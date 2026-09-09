@@ -12,7 +12,8 @@ from scraper.cleaners import (
     extract_dimensions,
     extract_finish,
     extract_material,
-    extract_color
+    extract_color,
+    safe_float
 )
 
 logger = logging.getLogger(__name__)
@@ -40,15 +41,24 @@ class WebsiteCrawler:
         })
         self.visited_urls: Set[str] = set()
 
-    def get(self, url: str) -> Optional[requests.Response]:
+    def get(self, url: str, max_retries: int = 2) -> Optional[requests.Response]:
         """Make safe GET request with error handling and retry."""
-        try:
-            resp = self.session.get(url, timeout=self.timeout)
-            if resp.status_code == 200:
-                return resp
-            logger.warning(f"Failed to fetch {url}, status code: {resp.status_code}")
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self.session.get(url, timeout=self.timeout)
+                if resp.status_code == 200:
+                    return resp
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                logger.warning(f"Failed to fetch {url}, status code: {resp.status_code}")
+                return None
+            except requests.RequestException as e:
+                if attempt < max_retries:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                logger.error(f"Error fetching {url}: {e}")
+                return None
         return None
 
     def crawl_all_products_json(self) -> List[Dict[str, Any]]:
@@ -81,31 +91,31 @@ class WebsiteCrawler:
                     specs = extract_specifications_table(raw_body)
 
                     # Extract variants info
-                    variants = p.get("variants", [])
-                    prices = [float(v.get("price", 0)) for v in variants if v.get("price")]
+                    variants = p.get("variants") or []
+                    prices = [safe_float(v.get("price")) for v in variants if v.get("price") is not None]
                     min_price = min(prices) if prices else 0.0
                     max_price = max(prices) if prices else 0.0
                     price_str = f"£{min_price:.2f}" if min_price == max_price else f"£{min_price:.2f} - £{max_price:.2f}"
 
                     skus = [v.get("sku") for v in variants if v.get("sku")]
-                    availability = any(v.get("available", False) for v in variants)
+                    availability = any(bool(v.get("available", False)) for v in variants)
 
                     # Extract sizes, finish, color, material
-                    options = p.get("options", [])
+                    options = p.get("options") or []
                     option_values = []
                     for opt in options:
-                        option_values.extend(opt.get("values", []))
+                        option_values.extend(opt.get("values") or [])
 
-                    combined_text = f"{title} {' '.join(option_values)} {cleaned_body}"
+                    combined_text = f"{title} {' '.join(str(o) for o in option_values)} {cleaned_body}"
                     dimensions = extract_dimensions(combined_text)
                     finish = extract_finish(combined_text)
                     material = extract_material(combined_text)
                     color = extract_color(combined_text)
 
                     # Categorization heuristics
-                    category = p.get("product_type", "").strip()
+                    category = (p.get("product_type") or "").strip()
                     if not category:
-                        tags = [t.lower() for t in p.get("tags", [])]
+                        tags = [str(t).lower() for t in (p.get("tags") or [])]
                         title_lower = title.lower()
                         if "bathroom" in title_lower or "bathroom" in tags:
                             category = "Bathroom Tiles"
@@ -125,12 +135,12 @@ class WebsiteCrawler:
                             category = "Tiles"
 
                     product_item = {
-                        "id": str(p.get("id")),
+                        "id": str(p.get("id", "")),
                         "title": title,
                         "handle": handle,
                         "url": product_url,
                         "category": category,
-                        "tags": p.get("tags", []),
+                        "tags": p.get("tags") or [],
                         "price": price_str,
                         "min_price": min_price,
                         "max_price": max_price,
@@ -139,12 +149,12 @@ class WebsiteCrawler:
                         "all_skus": skus,
                         "variants": [
                             {
-                                "id": str(v.get("id")),
-                                "title": v.get("title"),
-                                "price": f"£{float(v.get('price', 0)):.2f}" if v.get("price") else "N/A",
-                                "compare_at_price": f"£{float(v.get('compare_at_price', 0)):.2f}" if v.get("compare_at_price") else None,
-                                "sku": v.get("sku"),
-                                "available": v.get("available", False)
+                                "id": str(v.get("id", "")),
+                                "title": v.get("title", ""),
+                                "price": f"£{safe_float(v.get('price')):.2f}" if v.get("price") is not None else "N/A",
+                                "compare_at_price": f"£{safe_float(v.get('compare_at_price')):.2f}" if v.get("compare_at_price") is not None else None,
+                                "sku": v.get("sku", ""),
+                                "available": bool(v.get("available", False))
                             }
                             for v in variants
                         ],
@@ -155,7 +165,7 @@ class WebsiteCrawler:
                         "specifications": specs,
                         "description": cleaned_body,
                         "content_type": "product",
-                        "images": [img.get("src") for img in p.get("images", []) if img.get("src")]
+                        "images": [img.get("src") for img in (p.get("images") or []) if img.get("src")]
                     }
                     products.append(product_item)
 
@@ -184,15 +194,15 @@ class WebsiteCrawler:
 
         try:
             root = ET.fromstring(resp.content)
-            namespace = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-            sub_sitemaps = [elem.text.strip() for elem in root.findall(".//ns:loc", namespace) if elem.text]
+            # Find all <loc> tags regardless of XML namespace
+            sub_sitemaps = [elem.text.strip() for elem in root.iter() if elem.tag.endswith("loc") and elem.text]
 
             for s_url in sub_sitemaps:
                 sub_resp = self.get(s_url)
                 if not sub_resp:
                     continue
                 sub_root = ET.fromstring(sub_resp.content)
-                locs = [elem.text.strip() for elem in sub_root.findall(".//ns:loc", namespace) if elem.text]
+                locs = [elem.text.strip() for elem in sub_root.iter() if elem.tag.endswith("loc") and elem.text]
 
                 if "pages" in s_url:
                     sitemap_types["pages"].extend(locs)
@@ -220,7 +230,7 @@ class WebsiteCrawler:
 
         try:
             soup = BeautifulSoup(resp.text, "html.parser")
-            title = soup.title.string.strip() if soup.title and soup.title.string else ""
+            title = soup.title.get_text().strip() if soup.title else ""
             title = title.replace("– Surfaces Tiles", "").replace("- Surfaces Tiles", "").strip()
 
             # Remove header, footer, navigation elements
