@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AliasChoices
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -19,10 +19,22 @@ class Settings(BaseSettings):
 
     # Data & Storage Directories
     base_dir: Path = BASE_DIR
-    data_raw_dir: Path = BASE_DIR / "data" / "raw"
-    data_processed_dir: Path = BASE_DIR / "data" / "processed"
-    chroma_persist_dir: Path = BASE_DIR / "data" / "embeddings" / "chroma"
-    logs_dir: Path = BASE_DIR / "logs"
+    data_raw_dir: Path = Field(
+        default=BASE_DIR / "data" / "raw",
+        validation_alias=AliasChoices("DATA_RAW_DIR", "data_raw_dir")
+    )
+    data_processed_dir: Path = Field(
+        default=BASE_DIR / "data" / "processed",
+        validation_alias=AliasChoices("DATA_PROCESSED_DIR", "data_processed_dir")
+    )
+    chroma_persist_dir: Path = Field(
+        default=BASE_DIR / "data" / "embeddings" / "chroma",
+        validation_alias=AliasChoices("CHROMA_PERSIST_DIR", "chroma_persist_dir")
+    )
+    logs_dir: Path = Field(
+        default=BASE_DIR / "logs",
+        validation_alias=AliasChoices("LOGS_DIR", "logs_dir")
+    )
     log_retention_days: int = Field(default=2, validation_alias="LOG_RETENTION_DAYS")
 
     # Scraper Settings

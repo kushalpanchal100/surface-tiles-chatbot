@@ -55,12 +55,26 @@ class SurfacesVectorStore:
         if not chunks or not embeddings or len(chunks) != len(embeddings):
             raise ValueError(f"Chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match in length.")
 
-        ids = [chunk["id"] for chunk in chunks]
-        documents = [chunk["text"] for chunk in chunks]
+        # Deduplicate chunks by ID defensively
+        seen_ids = set()
+        deduped_chunks = []
+        deduped_embeddings = []
+        for idx, chunk in enumerate(chunks):
+            cid = str(chunk.get("id") or f"chunk_{idx}")
+            if cid in seen_ids:
+                cid = f"{cid}_{idx}"
+            seen_ids.add(cid)
+            chunk_copy = dict(chunk)
+            chunk_copy["id"] = cid
+            deduped_chunks.append(chunk_copy)
+            deduped_embeddings.append(embeddings[idx])
+
+        ids = [chunk["id"] for chunk in deduped_chunks]
+        documents = [chunk["text"] for chunk in deduped_chunks]
 
         # ChromaDB metadata values must be str, int, float, or bool
         metadatas = []
-        for chunk in chunks:
+        for chunk in deduped_chunks:
             raw_meta = chunk.get("metadata", {})
             clean_meta = {}
             for k, v in raw_meta.items():
@@ -79,7 +93,7 @@ class SurfacesVectorStore:
             self.collection.upsert(
                 ids=ids[i:end_idx],
                 documents=documents[i:end_idx],
-                embeddings=embeddings[i:end_idx],
+                embeddings=deduped_embeddings[i:end_idx],
                 metadatas=metadatas[i:end_idx]
             )
 
@@ -93,6 +107,10 @@ class SurfacesVectorStore:
         where_filter: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Perform cosine similarity vector search with optional metadata filtering."""
+        if not query_embedding:
+            logger.warning("Empty query embedding passed to search.")
+            return []
+
         if self.count() == 0:
             logger.warning("Vector store is empty. No documents to search.")
             return []
@@ -106,7 +124,11 @@ class SurfacesVectorStore:
         if where_filter:
             kwargs["where"] = where_filter
 
-        results = self.collection.query(**kwargs)
+        try:
+            results = self.collection.query(**kwargs)
+        except Exception as e:
+            logger.error(f"Error querying ChromaDB: {e}", exc_info=True)
+            return []
 
         hits: List[Dict[str, Any]] = []
         if not results or not results.get("ids") or not results["ids"][0]:

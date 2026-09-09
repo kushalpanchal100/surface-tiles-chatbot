@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -107,6 +108,10 @@ def format_interaction_log(
     return log_content
 
 
+_last_cleanup_time = 0.0
+_cleanup_lock = threading.Lock()
+
+
 def cleanup_old_logs(
     logs_dir: Optional[Path] = None,
     retention_days: Optional[int] = None,
@@ -114,6 +119,7 @@ def cleanup_old_logs(
 ) -> List[Path]:
     """
     Automatically delete log files older than retention_days (default: 2 days).
+    Only deletes files strictly matching the chatbot log timestamp naming pattern.
     Returns list of deleted file paths.
     """
     target_dir = logs_dir or get_logs_dir()
@@ -129,24 +135,18 @@ def cleanup_old_logs(
             if not file_path.is_file():
                 continue
 
-            file_dt: Optional[datetime] = None
-            # Match timestamp in filename: YYYY-MM-DD-HHMMSS
+            # Strictly match timestamp in chatbot log filename: YYYY-MM-DD-HHMMSS...
             match = re.match(r"^(\d{4}-\d{2}-\d{2})-(\d{2})(\d{2})(\d{2})", file_path.stem)
-            if match:
-                try:
-                    date_part = match.group(1)
-                    hour, minute, second = match.group(2), match.group(3), match.group(4)
-                    file_dt = datetime.strptime(f"{date_part}-{hour}{minute}{second}", "%Y-%m-%d-%H%M%S")
-                except ValueError:
-                    file_dt = None
+            if not match:
+                # Do NOT delete arbitrary files (e.g. notes.txt, server.txt) in the logs directory!
+                continue
 
-            if file_dt is None:
-                # Fallback to filesystem modification time
-                try:
-                    mtime = file_path.stat().st_mtime
-                    file_dt = datetime.fromtimestamp(mtime)
-                except Exception:
-                    file_dt = None
+            try:
+                date_part = match.group(1)
+                hour, minute, second = match.group(2), match.group(3), match.group(4)
+                file_dt = datetime.strptime(f"{date_part}-{hour}{minute}{second}", "%Y-%m-%d-%H%M%S")
+            except ValueError:
+                continue
 
             if file_dt and file_dt < cutoff:
                 try:
@@ -176,6 +176,7 @@ def write_interaction_log(
     Synchronously write interaction log file and trigger cleanup.
     Wrapped with exception handling so errors are logged and do not crash callers.
     """
+    global _last_cleanup_time
     ts = timestamp or datetime.now()
     target_dir = logs_dir or get_logs_dir()
 
@@ -195,10 +196,17 @@ def write_interaction_log(
         logger.error(f"Failed to write interaction log to {log_path}: {e}", exc_info=True)
 
     if perform_cleanup:
-        try:
-            cleanup_old_logs(logs_dir=target_dir, retention_days=retention_days, now=ts)
-        except Exception as e:
-            logger.error(f"Failed to perform automated log cleanup: {e}", exc_info=True)
+        import time
+        curr_time = time.time()
+        # Throttle cleanup to at most once per hour to prevent disk thrashing
+        if curr_time - _last_cleanup_time > 3600:
+            with _cleanup_lock:
+                if curr_time - _last_cleanup_time > 3600:
+                    try:
+                        cleanup_old_logs(logs_dir=target_dir, retention_days=retention_days, now=ts)
+                        _last_cleanup_time = curr_time
+                    except Exception as e:
+                        logger.error(f"Failed to perform automated log cleanup: {e}", exc_info=True)
 
     return log_path
 

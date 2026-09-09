@@ -114,13 +114,26 @@ class SurfacesRetriever:
 
         reranked = []
         for hit in hits:
-            score = hit.get("score", 0.0)
-            meta = hit.get("metadata", {})
-            text = hit.get("text", "").lower()
+            score = hit.get("score") or 0.0
+            meta = hit.get("metadata") or {}
+            text = (hit.get("text") or "").lower()
             title = (meta.get("title") or meta.get("product_name") or "").lower()
 
-            is_outdoor = bool(meta.get("is_outdoor", False)) or "outdoor" in title or "2cm" in title
-            is_spc = bool(meta.get("is_spc", False)) or "spc" in title or "vinyl" in title
+            raw_is_outdoor = meta.get("is_outdoor")
+            is_outdoor = (
+                raw_is_outdoor is True
+                or str(raw_is_outdoor).lower() in ("true", "1")
+                or "outdoor" in title
+                or "2cm" in title
+            )
+
+            raw_is_spc = meta.get("is_spc")
+            is_spc = (
+                raw_is_spc is True
+                or str(raw_is_spc).lower() in ("true", "1")
+                or "spc" in title
+                or "vinyl" in title
+            )
 
             boost = 0.0
 
@@ -155,8 +168,9 @@ class SurfacesRetriever:
 
             # Colour match boost
             colors = ["grey", "gray", "white", "black", "beige", "blue", "green", "gold", "charcoal", "cream", "anthracite", "ash"]
+            meta_color = (meta.get("color") or "").lower()
             for color in colors:
-                if color in q_lower and (color in title or meta.get("color", "").lower() == color):
+                if color in q_lower and (color in title or meta_color == color):
                     boost += 0.03
                     break
 

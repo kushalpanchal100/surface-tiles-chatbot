@@ -20,7 +20,7 @@ class SurfacesChatbot:
     ):
         self.retriever = retriever or SurfacesRetriever()
         self.model_name = model_name or settings.gemini_model
-        self.api_key = api_key or settings.gemini_api_key
+        self.api_key = api_key if api_key is not None else settings.gemini_api_key
         self.client = None
         self.mock_mode = not bool(self.api_key and self.api_key != "your_gemini_api_key_here")
 
@@ -43,6 +43,28 @@ class SurfacesChatbot:
         if not history:
             return message
 
+        clean_msg = message.strip()
+        lower_msg = clean_msg.lower()
+        words = lower_msg.split()
+
+        # Ignore greetings, closings, and name queries from follow-up enrichment
+        greetings_and_closings = {
+            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+            "thanks", "thank you", "cheers", "bye", "goodbye", "ok", "okay"
+        }
+        name_queries = {
+            "what is your name", "what's your name", "whats your name",
+            "who are you", "what is your name?", "what's your name?",
+            "whats your name?", "who are you?", "your name"
+        }
+        if (
+            lower_msg in greetings_and_closings
+            or lower_msg in name_queries
+            or (len(words) <= 2 and any(g in lower_msg for g in greetings_and_closings))
+            or any(nq in lower_msg for nq in ["what is your name", "what's your name", "who are you"])
+        ):
+            return message
+
         recent_turns = history[-4:]
         context_cues = []
 
@@ -62,27 +84,35 @@ class SurfacesChatbot:
                 continue
 
             if role_str in ("user", "customer"):
-                context_cues.append(content_str)
+                cue_words = content_str.split()[:12]
+                context_cues.append(" ".join(cue_words))
             elif role_str in ("assistant", "model"):
-                # Extract any mentioned markdown product titles: [Product Name]
+                # Extract markdown product titles: [Product Name]
                 links = re.findall(r"\[(.*?)\]", content_str)
                 if links:
                     context_cues.extend(links[:2])
 
         if context_cues:
-            lower_msg = message.lower()
             follow_up_cues = [
                 "they", "these", "those", "it", "them", "both", "all",
                 "sample", "samples", "size", "sizes", "slip", "price",
-                "cost", "delivery", "stock", "outdoor", "indoor", "wall", "floor"
+                "cost", "delivery", "stock", "outdoor", "indoor", "wall", "floor",
+                "which", "what", "how much", "how many", "colours", "colors", "finish"
             ]
-            words = lower_msg.split()
-            # If the user asks a short question or uses follow-up pronouns
-            if any(cue in words or cue in lower_msg for cue in follow_up_cues) or len(words) <= 7:
-                recent_context = " ".join(context_cues[-2:])
-                return f"{message} {recent_context}"
+            is_explicit_follow_up = any(cue in words or cue in lower_msg for cue in follow_up_cues)
+            is_short_refinement = len(words) <= 5 and any(w.endswith("?") or w in ["in", "with", "for", "more", "other"] for w in words)
 
-        return message
+            if is_explicit_follow_up or is_short_refinement:
+                seen = set()
+                clean_cues = []
+                for c in context_cues:
+                    if c.lower() not in seen:
+                        seen.add(c.lower())
+                        clean_cues.append(c)
+                recent_context = " ".join(clean_cues[-2:])
+                return f"{clean_msg} {recent_context}".strip()
+
+        return clean_msg
 
     def answer_question(
         self,
@@ -113,32 +143,57 @@ class SurfacesChatbot:
         if self.mock_mode or not self.client:
             answer = self._generate_mock_response(message, retrieval_result, active_history)
         else:
-            try:
-                from google.genai import types
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
-                        temperature=0.3,
-                        max_output_tokens=600,
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            from google.genai import types
+            for attempt in range(2):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
+                            temperature=0.3,
+                            max_output_tokens=600,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                        )
                     )
-                )
-                answer = response.text if response and response.text else "I'm sorry, I couldn't find that information right now. Please reach out to our customer support team for help."
-            except Exception as e:
-                logger.error(f"Error calling Gemini API: {e}")
-                # Provide grounded fallback from retrieved context if available
-                if sources:
-                    top_source = sources[0]
-                    price_str = f" – {top_source['price']}" if top_source.get('price') else ""
-                    answer = (
-                        f"Here is a great option from our catalog:\n\n"
-                        f"- **[{top_source['title']}]({top_source['url']})**{price_str}\n\n"
-                        f"Would you like to know more about this tile or order a free sample?"
-                    )
-                else:
-                    answer = "I'm sorry, I couldn't find that information on our website. Please reach out to our customer support team or visit surfacestiles.co.uk!"
+                    answer = response.text if response and response.text else "I'm sorry, I couldn't find that information right now. Please reach out to our customer support team for help."
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    is_transient = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str or "timeout" in err_str.lower()
+                    if is_transient and attempt == 0:
+                        logger.warning(f"Transient error calling Gemini API ({e}). Retrying once...")
+                        import time
+                        time.sleep(2.0)
+                        continue
+
+                    logger.error(f"Error calling Gemini API: {e}")
+                    # Provide grounded fallback from retrieved context if available
+                    if sources:
+                        top_source = sources[0]
+                        ctype = (top_source.get("content_type") or "").lower()
+                        if ctype == "product":
+                            price_str = f" – {top_source['price']}" if top_source.get('price') else ""
+                            answer = (
+                                f"Here is a great option from our catalog:\n\n"
+                                f"- **[{top_source['title']}]({top_source['url']})**{price_str}\n\n"
+                                f"Would you like to know more about this tile or order a free sample?"
+                            )
+                        else:
+                            answer = (
+                                f"You can find detailed information on our website here:\n\n"
+                                f"- **[{top_source['title']}]({top_source['url']})**\n\n"
+                                f"Please feel free to ask if you need further help!"
+                            )
+                    else:
+                        lower_m = message.strip().lower()
+                        if any(nq in lower_m for nq in ["what is your name", "what's your name", "whats your name", "who are you", "your name"]):
+                            answer = "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
+                        elif any(lower_m == g or lower_m.startswith(f"{g} ") or lower_m.startswith(f"{g}!") or lower_m.startswith(f"{g},") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
+                            answer = "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you today?"
+                        else:
+                            answer = "I'm sorry, I couldn't find that information on our website. Please reach out to our customer support team or visit surfacestiles.co.uk!"
+                    break
 
         return {
             "answer": answer,
@@ -154,6 +209,14 @@ class SurfacesChatbot:
         """Generate a grounded mock response when running in demo/offline mode."""
         sources = retrieval_result.get("sources", [])
 
+        lower_msg = (message or "").strip().lower()
+
+        # Handle direct name inquiries and greetings in mock/offline mode
+        if any(nq in lower_msg for nq in ["what is your name", "what's your name", "whats your name", "who are you", "your name"]):
+            return "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
+        if any(lower_msg == g or lower_msg.startswith(f"{g} ") or lower_msg.startswith(f"{g}!") or lower_msg.startswith(f"{g},") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
+            return "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you today?"
+
         if not sources:
             if history:
                 return (
@@ -167,18 +230,25 @@ class SurfacesChatbot:
 
         # Extract top 2-3 matching items
         items = []
+        has_products = False
         for s in sources[:3]:
             title = s.get("title", "Product")
             url = s.get("url", "")
-            price = f" – {s['price']}" if s.get("price") else ""
-            items.append(f"- **[{title}]({url})**{price}")
+            ctype = (s.get("content_type") or "").lower()
+            if ctype == "product":
+                has_products = True
+                price = f" – {s['price']}" if s.get("price") else ""
+                items.append(f"- **[{title}]({url})**{price}")
+            else:
+                items.append(f"- **[{title}]({url})**")
 
-        intro = "Following on from our conversation, here are matching options:" if history else "Here are a few popular options that might suit your project:"
+        if has_products:
+            intro = "Following on from our conversation, here are matching options:" if history else "Here are a few popular options that might suit what you're looking for:"
+            closing = "We offer free samples across our porcelain range so you can see the colour and texture at home. Would you like any extra details on these?"
+        else:
+            intro = "Here is the relevant information from our website:"
+            closing = "Please let me know if you would like any further details or assistance!"
 
-        return (
-            f"{intro}\n\n"
-            + "\n".join(items)
-            + "\n\nWe offer free samples across our porcelain range so you can see the colour and texture at home. Would you like any extra details on these?"
-        )
+        return f"{intro}\n\n" + "\n".join(items) + f"\n\n{closing}"
 
 

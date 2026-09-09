@@ -37,7 +37,9 @@ class GeminiEmbeddingService:
 
     def embed_text(self, text: str) -> List[float]:
         """Generate embedding for a single text query."""
-        results = self.embed_batch([text])
+        if not text or not str(text).strip():
+            return []
+        results = self.embed_batch([str(text).strip()])
         return results[0] if results else []
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -45,15 +47,18 @@ class GeminiEmbeddingService:
         if not texts:
             return []
 
+        # Sanitize texts: ensure no empty/whitespace strings are passed to the API
+        sanitized_texts = [str(t).strip() if (t and str(t).strip()) else "empty" for t in texts]
+
         if self.mock_mode or not self.client:
-            return [self._generate_mock_embedding(t) for t in texts]
+            return [self._generate_mock_embedding(t) for t in sanitized_texts]
 
         all_embeddings: List[List[float]] = []
 
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i:i + self.batch_size]
-            retries = 5
-            backoff = 2.0
+        for i in range(0, len(sanitized_texts), self.batch_size):
+            batch = sanitized_texts[i:i + self.batch_size]
+            retries = 3
+            backoff = 1.5
 
             while retries > 0:
                 try:
@@ -75,30 +80,40 @@ class GeminiEmbeddingService:
                     all_embeddings.extend(batch_vectors)
                     break
                 except Exception as e:
-                    retries -= 1
                     err_str = str(e)
-                    wait_time = backoff
-                    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+                    is_rate_limit = "RESOURCE_EXHAUSTED" in err_str or "429" in err_str
+                    is_server_error = any(code in err_str for code in ["500", "502", "503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED"])
+                    is_transient = is_rate_limit or is_server_error or "timeout" in err_str.lower() or "connection" in err_str.lower()
+
+                    if not is_transient:
+                        # Non-transient / client error (400, 401, 403, InvalidArgument)
+                        logger.error(f"Permanent error calling Gemini embedding API ({e}). Using mock embeddings fallback.")
+                        all_embeddings.extend([self._generate_mock_embedding(t) for t in batch])
+                        break
+
+                    retries -= 1
+                    if is_rate_limit:
                         import re
                         delay_match = re.search(r"retry\s+in\s+([\d\.]+)\s*s", err_str, re.IGNORECASE)
                         if delay_match:
-                            wait_time = float(delay_match.group(1)) + 2.0
+                            wait_time = float(delay_match.group(1)) + 1.0
                         else:
-                            wait_time = 35.0
-                        logger.warning(f"Rate limit hit. Waiting {wait_time:.1f}s before retry... (Retries remaining: {retries})")
+                            wait_time = 10.0
+                        logger.warning(f"Rate limit hit. Waiting {wait_time:.1f}s before retry... (Retries left: {retries})")
                     else:
-                        logger.warning(f"Embedding batch error: {e}. Retries remaining: {retries}")
+                        wait_time = backoff
+                        logger.warning(f"Transient embedding error ({e}). Waiting {wait_time:.1f}s... (Retries left: {retries})")
 
                     if retries == 0:
-                        logger.error(f"Failed to generate embeddings after multiple attempts: {e}")
+                        logger.error(f"Failed to generate embeddings after retries: {e}")
                         all_embeddings.extend([self._generate_mock_embedding(t) for t in batch])
                     else:
                         time.sleep(wait_time)
-                        backoff *= 2
+                        backoff = min(backoff * 2, 10.0)
 
-            # Delay to respect API rate limits
-            if i + self.batch_size < len(texts):
-                time.sleep(1.0)
+            # Delay between batches to respect API rate limits
+            if i + self.batch_size < len(sanitized_texts):
+                time.sleep(0.5)
 
         return all_embeddings
 

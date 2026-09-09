@@ -49,7 +49,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -67,7 +67,7 @@ def root():
         "endpoints": {
             "chat": "POST /chat",
             "health": "GET /health",
-            "scrape": "POST /scrape",
-            "ingest": "POST /ingest"
+            "sessions": "GET /sessions",
+            "jobs_status": "GET /jobs/status"
         }
     })

@@ -4,13 +4,29 @@ from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
 
 
-def clean_html_text(raw_html: str) -> str:
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely convert any value to float, returning default if conversion fails."""
+    if val is None:
+        return default
+    try:
+        if isinstance(val, str):
+            # Strip currency symbols, commas, whitespace
+            cleaned = re.sub(r"[^\d\.]", "", val.strip())
+            return float(cleaned) if cleaned else default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def clean_html_text(raw_html: Any) -> str:
     """Clean HTML content into human-readable plain text, removing scripts,
 
     styles, and excess whitespace while preserving paragraph structure.
     """
     if not raw_html:
         return ""
+    if not isinstance(raw_html, str):
+        raw_html = str(raw_html)
 
     soup = BeautifulSoup(raw_html, "html.parser")
 
@@ -72,17 +88,21 @@ def extract_specifications_table(soup_or_html: Any) -> Dict[str, str]:
     return specs
 
 
-def extract_dimensions(text: str) -> Optional[str]:
+def extract_dimensions(text: Any) -> Optional[str]:
     """Extract tile dimensions (e.g., '30x60 CM', '60x120 CM', '600x600 mm') from text."""
+    if not text:
+        return None
     pattern = r"\b(\d{2,4}\s*[xX*×]\s*\d{2,4}\s*(?:cm|mm)?)\b"
-    match = re.search(pattern, text, re.IGNORECASE)
+    match = re.search(pattern, str(text), re.IGNORECASE)
     if match:
         return match.group(1).upper()
     return None
 
 
-def extract_finish(text: str) -> Optional[str]:
+def extract_finish(text: Any) -> Optional[str]:
     """Detect common tile finishes in text."""
+    if not text:
+        return None
     finishes = [
         "Polished",
         "Matt",
@@ -98,31 +118,36 @@ def extract_finish(text: str) -> Optional[str]:
         "Anti-slip"
     ]
     found = []
-    text_lower = text.lower()
+    text_lower = str(text).lower()
     for f in finishes:
         if re.search(rf"\b{re.escape(f.lower())}\b", text_lower):
             found.append(f)
     return ", ".join(found) if found else None
 
 
-def extract_material(text: str) -> Optional[str]:
+def extract_material(text: Any) -> Optional[str]:
     """Detect tile material from text."""
+    if not text:
+        return "Porcelain"
     materials = ["Porcelain", "Ceramic", "Glass", "Marble", "Stone", "SPC", "Vinyl"]
+    text_str = str(text)
     for m in materials:
-        if re.search(rf"\b{re.escape(m.lower())}\b", text, re.IGNORECASE):
+        if re.search(rf"\b{re.escape(m.lower())}\b", text_str, re.IGNORECASE):
             return m
     return "Porcelain"  # default standard for Surfaces Tiles UK
 
 
-def extract_color(text: str) -> Optional[str]:
+def extract_color(text: Any) -> Optional[str]:
     """Detect common colors from text."""
+    if not text:
+        return None
     colors = [
         "White", "Grey", "Gray", "Black", "Beige", "Cream", "Ivory",
         "Blue", "Green", "Brown", "Gold", "Silver", "Anthracite",
         "Charcoal", "Calacatta", "Statuario", "Carrara", "Travertine"
     ]
     found = []
-    text_lower = text.lower()
+    text_lower = str(text).lower()
     for c in colors:
         if re.search(rf"\b{re.escape(c.lower())}\b", text_lower):
             found.append(c)

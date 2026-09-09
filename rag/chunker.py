@@ -88,7 +88,7 @@ class ContentChunker:
                 collections = json.load(f)
 
             for col in collections:
-                col_name = col.get("title", "").strip()
+                col_name = (col.get("title") or "").strip()
                 if not col_name or col_name in ["All Collection Tiles", "PRODUCTS ON SALE", "New Arrivals"]:
                     continue
                 raw_text = col.get("raw_text", "")
@@ -109,27 +109,28 @@ class ContentChunker:
         collection_map = self._load_collection_mapping()
         chunks = []
 
-        for p in products:
-            title = p.get("title", "")
-            url = p.get("url", "")
-            category = p.get("category", "Tiles")
-            price = p.get("price", "N/A")
+        for idx, p in enumerate(products):
+            title = p.get("title") or ""
+            url = p.get("url") or ""
+            category = p.get("category") or "Tiles"
+            price = p.get("price") or "N/A"
             dims = p.get("dimensions") or "See specifications"
             finish = p.get("finish") or "See specifications"
             material = p.get("material") or "Porcelain"
             color = p.get("color") or "See description"
             sku = p.get("sku") or "N/A"
             availability = "In Stock / Available" if p.get("available") else "Out of Stock"
-            desc = p.get("description", "")
-            specs = p.get("specifications", {})
-            tags = p.get("tags", [])
+            desc = p.get("description") or ""
+            specs = p.get("specifications") or {}
+            tags = p.get("tags") or []
 
             # Match collections from website
             title_clean = title.strip().lower()
             matched_cols = list(collection_map.get(title_clean, []))
 
             # Deduce room suitability and specific applications
-            full_context_str = f"{title} {category} {' '.join(tags)} {desc}".lower()
+            tags_str = " ".join(str(t) for t in tags)
+            full_context_str = f"{title} {category} {tags_str} {desc}".lower()
             is_outdoor = "outdoor" in full_context_str or "2cm" in full_context_str or "Outdoor Tiles" in matched_cols
             is_spc = "spc" in full_context_str or "vinyl" in full_context_str or "flooring" in title_clean or "SPC FLOORING" in matched_cols
 
@@ -184,18 +185,17 @@ class ContentChunker:
                 body_content += f"\nTechnical Specifications:\n{specs_str}\n"
 
             # Check if variants have different prices or sizes
-            variants = p.get("variants", [])
+            variants = p.get("variants") or []
             if len(variants) > 1:
                 var_str = "\nAvailable Options / Variants:\n" + "\n".join([
-                    f"- {v.get('title')}: {v.get('price')} (SKU: {v.get('sku', 'N/A')})"
-                    for v in variants
+                    f"- {v.get('title', 'Option')}: {v.get('price', 'N/A')} (SKU: {v.get('sku', 'N/A')})"
+                    for v in variants if isinstance(v, dict)
                 ])
-                body_content += var_str
-
+                body_content += f"{var_str}\n"
             full_text = f"{header}\n{body_content}".strip()
-
+            prod_identifier = str(p.get("id") or p.get("handle") or f"idx_{idx}")
             chunk = {
-                "id": f"prod_{p.get('id', p.get('handle', ''))}",
+                "id": f"prod_{prod_identifier}",
                 "text": full_text,
                 "metadata": {
                     "url": url,
@@ -303,15 +303,16 @@ class ContentChunker:
     def chunk_collections(self, collections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Create structured overview chunks for store collections."""
         chunks = []
-        for c in collections:
-            title = c.get("title", "")
-            url = c.get("url", "")
-            raw_text = c.get("raw_text", "")
+        for idx, c in enumerate(collections):
+            title = c.get("title") or ""
+            url = c.get("url") or ""
+            raw_text = c.get("raw_text") or ""
             lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
             snippet = "\n".join(lines[:20]) if lines else ""
+            slug = url.rstrip("/").split("/")[-1] if url else f"idx_{idx}"
 
             chunk = {
-                "id": f"col_{url.split('/')[-1]}",
+                "id": f"col_{slug}",
                 "text": f"Collection: {title}\nURL: {url}\nOverview:\n{snippet}",
                 "metadata": {
                     "url": url,
