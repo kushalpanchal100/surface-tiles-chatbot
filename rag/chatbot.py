@@ -1,5 +1,6 @@
+import re
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from config.settings import settings
 from rag.retriever import SurfacesRetriever
@@ -34,28 +35,83 @@ class SurfacesChatbot:
         else:
             logger.info("Operating SurfacesChatbot in mock mode (no API key configured).")
 
+    def _build_retrieval_query(self, message: str, history: Optional[List[Any]] = None) -> str:
+        """
+        If the current message appears to be a follow-up referring to prior items,
+        enrich the retrieval query with recent customer or product context from history.
+        """
+        if not history:
+            return message
+
+        recent_turns = history[-4:]
+        context_cues = []
+
+        for msg in recent_turns:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content") or msg.get("message") or msg.get("text", "")
+            elif hasattr(msg, "role") and hasattr(msg, "content"):
+                role = getattr(msg, "role", "user")
+                content = getattr(msg, "content", "")
+            else:
+                continue
+
+            role_str = str(role).lower()
+            content_str = str(content).strip()
+            if not content_str:
+                continue
+
+            if role_str in ("user", "customer"):
+                context_cues.append(content_str)
+            elif role_str in ("assistant", "model"):
+                # Extract any mentioned markdown product titles: [Product Name]
+                links = re.findall(r"\[(.*?)\]", content_str)
+                if links:
+                    context_cues.extend(links[:2])
+
+        if context_cues:
+            lower_msg = message.lower()
+            follow_up_cues = [
+                "they", "these", "those", "it", "them", "both", "all",
+                "sample", "samples", "size", "sizes", "slip", "price",
+                "cost", "delivery", "stock", "outdoor", "indoor", "wall", "floor"
+            ]
+            words = lower_msg.split()
+            # If the user asks a short question or uses follow-up pronouns
+            if any(cue in words or cue in lower_msg for cue in follow_up_cues) or len(words) <= 7:
+                recent_context = " ".join(context_cues[-2:])
+                return f"{message} {recent_context}"
+
+        return message
+
     def answer_question(
         self,
         message: str,
+        history: Optional[List[Any]] = None,
         category: Optional[str] = None,
         top_k: Optional[int] = None
     ) -> Dict[str, Any]:
         """Execute full RAG generation: retrieve website context -> call Gemini LLM -> return response."""
-        # 1. Retrieve relevant website context
+        # Ensure history is clamped to max configured limit (default: 10)
+        max_hist = getattr(settings, "max_chat_history", 10)
+        active_history = history[-max_hist:] if history else []
+
+        # 1. Retrieve relevant website context (contextualized if follow-up)
+        retrieval_query = self._build_retrieval_query(message, active_history)
         retrieval_result = self.retriever.retrieve(
-            query=message,
+            query=retrieval_query,
             top_k=top_k,
             category_filter=category
         )
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
-        # 2. Build prompt
-        prompt = build_rag_prompt(user_question=message, context=context)
+        # 2. Build prompt including up to 10 history messages
+        prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
 
         # 3. Generate response using Gemini
         if self.mock_mode or not self.client:
-            answer = self._generate_mock_response(message, retrieval_result)
+            answer = self._generate_mock_response(message, retrieval_result, active_history)
         else:
             try:
                 from google.genai import types
@@ -89,11 +145,21 @@ class SurfacesChatbot:
             "sources": sources
         }
 
-    def _generate_mock_response(self, message: str, retrieval_result: Dict[str, Any]) -> str:
+    def _generate_mock_response(
+        self,
+        message: str,
+        retrieval_result: Dict[str, Any],
+        history: Optional[List[Any]] = None
+    ) -> str:
         """Generate a grounded mock response when running in demo/offline mode."""
         sources = retrieval_result.get("sources", [])
 
         if not sources:
+            if history:
+                return (
+                    "Thank you for following up! For specific custom specifications or items outside our online catalog, "
+                    "our UK tile specialists would be delighted to help directly. Please reach out to contact@surfacestiles.co.uk."
+                )
             return (
                 "I'm sorry, I couldn't find any matching products or policies on our website. "
                 "Please visit surfacestiles.co.uk or contact our support team for assistance!"
@@ -107,9 +173,12 @@ class SurfacesChatbot:
             price = f" – {s['price']}" if s.get("price") else ""
             items.append(f"- **[{title}]({url})**{price}")
 
+        intro = "Following on from our conversation, here are matching options:" if history else "Here are a few popular options that might suit your project:"
+
         return (
-            "Here are a few popular options that might suit your project:\n\n"
+            f"{intro}\n\n"
             + "\n".join(items)
             + "\n\nWe offer free samples across our porcelain range so you can see the colour and texture at home. Would you like any extra details on these?"
         )
+
 

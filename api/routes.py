@@ -5,6 +5,7 @@ from typing import Optional
 
 from config.settings import settings
 from api.schemas import (
+    ChatMessage,
     ChatRequest,
     ChatResponse,
     ChatData,
@@ -15,6 +16,7 @@ from api.schemas import (
     IngestRequest,
     IngestResponse,
 )
+from api.session_manager import session_manager
 from api.interaction_logger import log_interaction_background
 from rag.chatbot import SurfacesChatbot
 from rag.vector_store import SurfacesVectorStore
@@ -93,13 +95,42 @@ def chat_endpoint(
         )
         raise HTTPException(status_code=400, detail="The 'message' field cannot be empty.")
 
+    # Resolve chat history (capped to last 10 messages)
+    max_hist = getattr(settings, "max_chat_history", 10)
+    resolved_history = []
+
+    if request.history is not None:
+        resolved_history = request.history[-max_hist:]
+        if request.session_id:
+            session_manager.set_history(request.session_id, resolved_history)
+    elif request.session_id:
+        resolved_history = session_manager.get_history(request.session_id)
+
     try:
         result = chatbot.answer_question(
-            message=request.message
+            message=request.message,
+            history=resolved_history
         )
 
         response_text = result.get("answer", "")
         sources = result.get("sources", [])
+
+        # Update session memory or client history
+        updated_history = None
+        session_id_val = request.session_id
+
+        if request.session_id:
+            updated_history = session_manager.add_turn(
+                session_id=request.session_id,
+                user_message=request.message,
+                assistant_response=response_text
+            )
+        elif request.history is not None:
+            updated_history = list(resolved_history) + [
+                ChatMessage(role="user", content=request.message),
+                ChatMessage(role="assistant", content=response_text)
+            ]
+            updated_history = updated_history[-max_hist:]
 
         chat_response = ChatResponse(
             meta=ResponseMeta(
@@ -107,13 +138,17 @@ def chat_endpoint(
                 message="Successfully processed user measurements and preferences"
             ),
             data=ChatData(
-                Response=response_text
+                Response=response_text,
+                session_id=session_id_val,
+                history=updated_history
             ),
             statusCode=200
         )
 
         internal_system_details = {
             "status_code": 200,
+            "session_id": session_id_val,
+            "history_length": len(resolved_history),
             "system_meta": chat_response.meta.model_dump(),
             "retrieved_sources_count": len(sources),
             "retrieved_sources": sources,

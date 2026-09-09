@@ -193,14 +193,37 @@ Interactive Swagger API docs will be accessible at:
 ## 📡 API Reference & Examples
 
 ### 1. `POST /chat`
-Ask questions about tiles, pricing, delivery, samples, and returns.
+Ask questions about tiles, pricing, delivery, samples, and returns. Supports multi-turn conversational chat history (retaining up to the last 10 messages) via stateless `history` or stateful `session_id`.
 
-**Request:**
+**Single-Turn Request:**
 ```bash
 curl -X POST "http://localhost:8060/chat" \
      -H "Content-Type: application/json" \
      -d '{
        "message": "I need grey floor tiles for my bathroom. What do you recommend?"
+     }'
+```
+
+**Multi-Turn Request with Session ID (Keeps last 10 messages):**
+```bash
+curl -X POST "http://localhost:8060/chat" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "session_id": "cust-session-123",
+       "message": "Are they slip resistant and what sizes do they come in?"
+     }'
+```
+
+**Multi-Turn Request with Explicit History Payload:**
+```bash
+curl -X POST "http://localhost:8060/chat" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "message": "Can I get a sample?",
+       "history": [
+         {"role": "user", "content": "I need grey floor tiles for my bathroom."},
+         {"role": "assistant", "content": "We recommend Snow Sheen 30x60 CM Polished Porcelain..."}
+       ]
      }'
 ```
 
@@ -212,13 +235,25 @@ curl -X POST "http://localhost:8060/chat" \
     "message": "Successfully processed user measurements and preferences"
   },
   "data": {
-    "Response": "Based on our Surfaces Tiles UK collection, we recommend the following options for your bathroom floor:\n\n- **[Snow Sheen 30x60 CM Polished Porcelain](https://surfacestiles.co.uk/products/starlit-white-30x60-cm-polished)**: £19.99 (Size: 30x60 CM, Finish: Polished Porcelain). Featuring an elegant marble look that is durable and moisture resistant.\n\nWe offer **100% free tile samples** on all our products so you can evaluate the colour and finish in your home before ordering. Fast UK warehouse delivery is available."
+    "Response": "Based on our Surfaces Tiles UK collection, we recommend the following options for your bathroom floor:\n\n- **[Snow Sheen 30x60 CM Polished Porcelain](https://surfacestiles.co.uk/products/starlit-white-30x60-cm-polished)**: £19.99 (Size: 30x60 CM, Finish: Polished Porcelain). Featuring an elegant marble look that is durable and moisture resistant.\n\nWe offer **100% free tile samples** on all our products so you can evaluate the colour and finish in your home before ordering. Fast UK warehouse delivery is available.",
+    "session_id": "cust-session-123",
+    "history": [
+      {
+        "role": "user",
+        "content": "I need grey floor tiles for my bathroom."
+      },
+      {
+        "role": "assistant",
+        "content": "Based on our Surfaces Tiles UK collection..."
+      }
+    ]
   },
   "statusCode": 200
 }
 ```
 
 ---
+
 
 ### 2. `GET /health`
 Verify system status and knowledge base size.

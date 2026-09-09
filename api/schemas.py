@@ -1,5 +1,23 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(
+        ...,
+        description="Role of the sender: 'user' or 'assistant' / 'model'",
+        examples=["user", "assistant"]
+    )
+    content: str = Field(
+        ...,
+        validation_alias=AliasChoices("content", "message", "text"),
+        description="Text content of the message",
+        examples=["I need grey floor tiles for my bathroom."]
+    )
+
+    model_config = {
+        "populate_by_name": True
+    }
 
 
 class ChatRequest(BaseModel):
@@ -7,6 +25,14 @@ class ChatRequest(BaseModel):
         ...,
         description="The customer question or tile requirement query.",
         examples=["I need grey floor tiles for my bathroom. What do you recommend?"]
+    )
+    history: Optional[List[ChatMessage]] = Field(
+        default=None,
+        description="Optional list of prior chat messages (the last 10 messages will be considered for conversational context)."
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional session ID for automatic server-side conversational memory (retains up to 10 messages)."
     )
 
 
@@ -32,6 +58,14 @@ class ChatData(BaseModel):
     sources: Optional[List[SourceItem]] = Field(
         default=None,
         description="Verified sources retrieved from website"
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Active session ID if session tracking is enabled"
+    )
+    history: Optional[List[ChatMessage]] = Field(
+        default=None,
+        description="Updated conversation history for this session (last 10 messages)"
     )
 
 

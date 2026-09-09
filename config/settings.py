@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # RAG Settings
     top_k: int = 10
     score_threshold: float = 0.2
+    max_chat_history: int = Field(default=10, validation_alias="MAX_CHAT_HISTORY")
 
     # Server Settings
     host: str = Field(default="0.0.0.0", validation_alias="HOST")
