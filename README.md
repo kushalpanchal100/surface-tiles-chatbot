@@ -80,7 +80,7 @@ surfaces-tiles-chatbot/
 │   ├── __init__.py
 │   ├── schemas.py           # Pydantic models for requests, responses, and citations
 │   ├── routes.py            # Endpoints: /chat, /health, /scrape, /ingest
-│   └── main.py              # FastAPI app lifecycle, CORS, and server entrypoint
+│   └── app.py               # FastAPI app lifecycle, CORS, and endpoint definitions
 │
 ├── config/
 │   ├── __init__.py
@@ -90,18 +90,12 @@ surfaces-tiles-chatbot/
 │   ├── scrape.py            # CLI script to execute full website scrape
 │   └── ingest.py            # CLI script to process chunks, embed, and index in ChromaDB
 │
-├── tests/
-│   ├── test_cleaners.py     # Unit tests for HTML cleaning and specification extraction
-│   ├── test_chunker.py      # Unit tests for chunking logic and FAQ extraction
-│   ├── test_vector_store.py # Integration tests for ChromaDB storage and similarity search
-│   └── test_api.py          # Integration tests for FastAPI endpoints
-│
+├── main.py                  # Single application entrypoint (run with python main.py)
 ├── .env                     # Environment variables (API keys, models, ports)
 ├── .env.example             # Example environment configuration template
 ├── .gitignore
 ├── requirements.txt         # Pip dependency specifications
 ├── environment.yml          # Conda environment specifications
-├── pytest.ini
 └── README.md
 ```
 
@@ -147,7 +141,7 @@ Set your Google Gemini API key:
 GEMINI_API_KEY=your_actual_gemini_api_key_here
 GEMINI_MODEL=gemini-3.5-flash-lite
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-PORT=8000
+PORT=8060
 HOST=0.0.0.0
 ```
 
@@ -184,11 +178,15 @@ Processed chunks are saved to `data/processed/chunks.json`, and vectors are inde
 ### Step 3: Start FastAPI REST Server
 
 ```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+# Directly with Python:
+python main.py
+
+# Or with uvicorn:
+uvicorn main:app --host 0.0.0.0 --port 8060 --reload
 ```
 
 Interactive Swagger API docs will be accessible at:
-👉 **`http://localhost:8000/docs`**
+👉 **`http://localhost:8060/docs`**
 
 ---
 
@@ -199,7 +197,7 @@ Ask questions about tiles, pricing, delivery, samples, and returns.
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/chat" \
+curl -X POST "http://localhost:8060/chat" \
      -H "Content-Type: application/json" \
      -d '{
        "message": "I need grey floor tiles for my bathroom. What do you recommend?"
@@ -226,7 +224,7 @@ curl -X POST "http://localhost:8000/chat" \
 Verify system status and knowledge base size.
 
 ```bash
-curl -X GET "http://localhost:8000/health"
+curl -X GET "http://localhost:8060/health"
 ```
 
 **Response:**
@@ -247,7 +245,7 @@ curl -X GET "http://localhost:8000/health"
 Trigger a scrape programmatically via API.
 
 ```bash
-curl -X POST "http://localhost:8000/scrape" \
+curl -X POST "http://localhost:8060/scrape" \
      -H "Content-Type: application/json" \
      -d '{"run_in_background": false}'
 ```
@@ -258,24 +256,8 @@ curl -X POST "http://localhost:8000/scrape" \
 Trigger chunking, embedding generation, and vector DB update via API.
 
 ```bash
-curl -X POST "http://localhost:8000/ingest" \
+curl -X POST "http://localhost:8060/ingest" \
      -H "Content-Type: application/json" \
      -d '{"force_reset": true, "run_in_background": false}'
 ```
 
----
-
-## 🧪 Testing
-
-Run the automated test suite:
-
-```bash
-pytest -v
-```
-
-All 13 unit and integration tests cover:
-- HTML cleaning and specification table extraction
-- Dimension, finish, and material parsers
-- RAG chunking and FAQ question-answer block splitting
-- ChromaDB upsert, cosine distance querying, and metadata filters
-- FastAPI request validation and `/chat` response schemas

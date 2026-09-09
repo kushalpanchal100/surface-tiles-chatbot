@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     data_raw_dir: Path = BASE_DIR / "data" / "raw"
     data_processed_dir: Path = BASE_DIR / "data" / "processed"
     chroma_persist_dir: Path = BASE_DIR / "data" / "embeddings" / "chroma"
+    logs_dir: Path = BASE_DIR / "logs"
+    log_retention_days: int = Field(default=2, validation_alias="LOG_RETENTION_DAYS")
 
     # Scraper Settings
     base_url: str = "https://surfacestiles.co.uk"
@@ -34,7 +36,7 @@ class Settings(BaseSettings):
 
     # Server Settings
     host: str = Field(default="0.0.0.0", validation_alias="HOST")
-    port: int = Field(default=8000, validation_alias="PORT")
+    port: int = Field(default=8060, validation_alias="PORT")
     debug: bool = Field(default=False, validation_alias="DEBUG")
 
 
@@ -44,3 +46,4 @@ settings = Settings()
 settings.data_raw_dir.mkdir(parents=True, exist_ok=True)
 settings.data_processed_dir.mkdir(parents=True, exist_ok=True)
 settings.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
+settings.logs_dir.mkdir(parents=True, exist_ok=True)

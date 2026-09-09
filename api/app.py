@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from config.settings import settings
 from api.routes import router
+from api.interaction_logger import cleanup_old_logs
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -20,6 +21,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Gemini Model: {settings.gemini_model}")
     logger.info(f"Gemini Embedding Model: {settings.gemini_embedding_model}")
     logger.info(f"Vector Store Directory: {settings.chroma_persist_dir}")
+    logger.info(f"Logs Directory: {settings.logs_dir}")
+
+    # Perform initial cleanup of expired log files (> 2 days)
+    try:
+        deleted = cleanup_old_logs()
+        if deleted:
+            logger.info(f"Startup log cleanup removed {len(deleted)} expired log files.")
+    except Exception as e:
+        logger.warning(f"Error during startup log cleanup: {e}")
+
     yield
     logger.info("Shutting down Surfaces Tiles UK Chatbot API...")
 
@@ -60,13 +71,3 @@ def root():
             "ingest": "POST /ingest"
         }
     })
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "api.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug
-    )

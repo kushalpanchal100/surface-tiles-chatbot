@@ -40,3 +40,7 @@ data/embeddings/chroma/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Logs
+logs/
+*.log

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from typing import Optional
 
@@ -14,6 +15,7 @@ from api.schemas import (
     IngestRequest,
     IngestResponse,
 )
+from api.interaction_logger import log_interaction_background
 from rag.chatbot import SurfacesChatbot
 from rag.vector_store import SurfacesVectorStore
 from rag.retriever import SurfacesRetriever
@@ -74,10 +76,21 @@ def health_check(vstore: SurfacesVectorStore = Depends(get_vector_store)):
 @router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True, summary="Ask the Surfaces Tiles UK Chatbot")
 def chat_endpoint(
     request: ChatRequest,
+    background_tasks: BackgroundTasks,
     chatbot: SurfacesChatbot = Depends(get_chatbot)
 ):
     """Customer-facing RAG endpoint for questions about tiles, specs, delivery, pricing, and policies."""
+    interaction_time = datetime.now()
     if not request.message or not request.message.strip():
+        error_payload = {"detail": "The 'message' field cannot be empty."}
+        log_interaction_background(
+            background_tasks=None,
+            user_input=request.message or "",
+            internal_response={"status_code": 400, "validation_error": "Empty message"},
+            ai_response="None (Validation error)",
+            user_response=error_payload,
+            timestamp=interaction_time,
+        )
         raise HTTPException(status_code=400, detail="The 'message' field cannot be empty.")
 
     try:
@@ -86,8 +99,9 @@ def chat_endpoint(
         )
 
         response_text = result.get("answer", "")
+        sources = result.get("sources", [])
 
-        return ChatResponse(
+        chat_response = ChatResponse(
             meta=ResponseMeta(
                 status=1,
                 message="Successfully processed user measurements and preferences"
@@ -97,8 +111,38 @@ def chat_endpoint(
             ),
             statusCode=200
         )
+
+        internal_system_details = {
+            "status_code": 200,
+            "system_meta": chat_response.meta.model_dump(),
+            "retrieved_sources_count": len(sources),
+            "retrieved_sources": sources,
+        }
+
+        # Asynchronously log the interaction (non-blocking for the client)
+        log_interaction_background(
+            background_tasks=background_tasks,
+            user_input=request.message,
+            internal_response=internal_system_details,
+            ai_response=response_text,
+            user_response=chat_response.model_dump(),
+            timestamp=interaction_time,
+        )
+
+        return chat_response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing chat message: {e}", exc_info=True)
+        error_payload = {"detail": f"Internal chat error: {str(e)}"}
+        log_interaction_background(
+            background_tasks=None,
+            user_input=request.message,
+            internal_response={"status_code": 500, "error": str(e)},
+            ai_response="None (Error occurred during generation)",
+            user_response=error_payload,
+            timestamp=interaction_time,
+        )
         raise HTTPException(status_code=500, detail=f"Internal chat error: {str(e)}")
 
 
