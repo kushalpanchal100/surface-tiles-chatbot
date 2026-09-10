@@ -1,9 +1,11 @@
+import json
 import uuid
 import base64
 import logging
 import threading
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from typing import Optional, Dict, Any, List
 
 from config.settings import settings
@@ -224,6 +226,73 @@ def chat_endpoint(
             timestamp=interaction_time,
         )
         raise HTTPException(status_code=500, detail=f"Internal chat error: {str(e)}")
+
+
+@router.post("/chat/stream", summary="Stream Chatbot Response via Server-Sent Events (SSE)")
+async def chat_stream_endpoint(
+    request: ChatRequest,
+    chatbot: SurfacesChatbot = Depends(get_chatbot)
+):
+    """Real-time token streaming endpoint using Server-Sent Events (SSE).
+    Provides instant Time-to-First-Token (TTFT) response for customer chat.
+    """
+    clean_message = (request.message or "").strip()
+    session_id = request.session_id
+
+    if not clean_message:
+        raise HTTPException(status_code=400, detail="The 'message' field cannot be empty.")
+
+    resolved_history: List[Any] = []
+    if request.history:
+        resolved_history = request.history[-settings.max_chat_history:]
+        session_manager.set_history(session_id, resolved_history)
+    else:
+        resolved_history = session_manager.get_history(session_id)
+
+    def event_generator():
+        accumulated_answer = []
+        for chunk in chatbot.stream_answer_question(
+            message=clean_message,
+            history=resolved_history
+        ):
+            event_type = chunk.get("event")
+            if event_type == "sources":
+                raw_sources = chunk.get("sources", [])
+                formatted = []
+                for s in raw_sources:
+                    try:
+                        formatted.append({
+                            "title": s.get("title") or "Surfaces Tiles UK",
+                            "url": s.get("url") or settings.base_url,
+                            "category": s.get("category"),
+                            "content_type": s.get("content_type"),
+                            "price": s.get("price")
+                        })
+                    except Exception:
+                        pass
+                yield f"event: sources\ndata: {json.dumps({'sources': formatted})}\n\n"
+            elif event_type == "token":
+                delta = chunk.get("delta", "")
+                accumulated_answer.append(delta)
+                yield f"event: token\ndata: {json.dumps({'delta': delta})}\n\n"
+            elif event_type == "done":
+                full_text = "".join(accumulated_answer)
+                session_manager.add_turn(
+                    session_id=session_id,
+                    user_message=clean_message,
+                    assistant_response=full_text
+                )
+                yield f"event: done\ndata: {json.dumps({'status': 'completed', 'session_id': session_id})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.post("/voice/chat", response_model=VoiceChatResponse, response_model_exclude_none=True, summary="Voice Chat: Audio In -> STT -> RAG -> TTS -> Audio Out")

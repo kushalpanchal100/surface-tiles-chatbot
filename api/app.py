@@ -66,6 +66,7 @@ def root():
         "health": "/health",
         "endpoints": {
             "chat": "POST /chat",
+            "chat_stream": "POST /chat/stream",
             "voice_chat": "POST /voice/chat",
             "voice_transcribe": "POST /voice/transcribe",
             "voice_synthesize": "POST /voice/synthesize",

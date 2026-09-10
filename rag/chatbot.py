@@ -114,6 +114,41 @@ class SurfacesChatbot:
 
         return clean_msg
 
+    def _check_fast_path(self, message: str) -> Optional[str]:
+        """Detect standard conversational greetings, identity questions, or closings.
+        
+        Returns an instant, pre-defined natural response in < 1ms, completely bypassing
+        vector retrieval and remote LLM execution.
+        """
+        clean_msg = (message or "").strip().lower()
+        clean_msg_nopunct = re.sub(r"[!?,.]+$", "", clean_msg).strip()
+
+        # 1. Name & identity inquiries
+        name_queries = {
+            "what is your name", "what's your name", "whats your name",
+            "who are you", "tell me your name", "your name", "who are u"
+        }
+        if clean_msg_nopunct in name_queries or any(clean_msg_nopunct.startswith(nq) for nq in ["what is your name", "what's your name", "whats your name", "who are you"]):
+            return "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
+
+        # 2. Greetings
+        greetings = {
+            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+            "hello sophie", "hi sophie", "hey sophie", "greetings"
+        }
+        if clean_msg_nopunct in greetings or any(clean_msg_nopunct == g or clean_msg_nopunct.startswith(f"{g} ") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
+            return "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you find the right tiles today?"
+
+        # 3. Closings & Gratitude
+        closings = {
+            "thanks", "thank you", "thank you so much", "thanks a lot", "thanks sophie",
+            "thank you sophie", "cheers", "bye", "goodbye", "see you", "have a good day"
+        }
+        if clean_msg_nopunct in closings or any(clean_msg_nopunct.startswith(c) for c in ["thank you", "thanks", "cheers", "goodbye"]):
+            return "You're very welcome! If you have any further questions about our tiles, delivery, or free samples, feel free to ask. Have a great day!"
+
+        return None
+
     def answer_question(
         self,
         message: str,
@@ -122,6 +157,14 @@ class SurfacesChatbot:
         top_k: Optional[int] = None
     ) -> Dict[str, Any]:
         """Execute full RAG generation: retrieve website context -> call Gemini LLM -> return response."""
+        # 0. Fast-path check for greetings, name inquiries, and pleasantries (< 5ms response)
+        fast_answer = self._check_fast_path(message)
+        if fast_answer:
+            return {
+                "answer": fast_answer,
+                "sources": []
+            }
+
         # Ensure history is clamped to max configured limit (default: 10)
         max_hist = getattr(settings, "max_chat_history", 10)
         active_history = history[-max_hist:] if history else []
@@ -152,7 +195,7 @@ class SurfacesChatbot:
                         config=types.GenerateContentConfig(
                             system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
                             temperature=0.3,
-                            max_output_tokens=600,
+                            max_output_tokens=250,
                             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                         )
                     )
@@ -200,6 +243,75 @@ class SurfacesChatbot:
             "answer": answer,
             "sources": sources
         }
+
+    def stream_answer_question(
+        self,
+        message: str,
+        history: Optional[List[Any]] = None,
+        category: Optional[str] = None,
+        top_k: Optional[int] = None
+    ):
+        """Streaming generator that yields chunks for Server-Sent Events (SSE).
+        Yields:
+            {"event": "sources", "sources": [...]}
+            {"event": "token", "delta": "..."}
+            {"event": "done", "answer": "..."}
+        """
+        # Fast-path check
+        fast_answer = self._check_fast_path(message)
+        if fast_answer:
+            yield {"event": "sources", "sources": []}
+            yield {"event": "token", "delta": fast_answer}
+            yield {"event": "done", "answer": fast_answer}
+            return
+
+        max_hist = getattr(settings, "max_chat_history", 10)
+        active_history = history[-max_hist:] if history else []
+
+        retrieval_query = self._build_retrieval_query(message, active_history)
+        retrieval_result = self.retriever.retrieve(
+            query=retrieval_query,
+            top_k=top_k,
+            category_filter=category
+        )
+        context = retrieval_result.get("context", "")
+        sources = retrieval_result.get("sources", [])
+
+        yield {"event": "sources", "sources": sources}
+
+        prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
+
+        if self.mock_mode or not self.client:
+            answer = self._generate_mock_response(message, retrieval_result, active_history)
+            yield {"event": "token", "delta": answer}
+            yield {"event": "done", "answer": answer}
+            return
+
+        from google.genai import types
+        accumulated_text = []
+        try:
+            stream = self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
+                    temperature=0.3,
+                    max_output_tokens=250,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                )
+            )
+            for chunk in stream:
+                if chunk and chunk.text:
+                    accumulated_text.append(chunk.text)
+                    yield {"event": "token", "delta": chunk.text}
+
+            full_answer = "".join(accumulated_text)
+            yield {"event": "done", "answer": full_answer}
+        except Exception as e:
+            logger.error(f"Error streaming from Gemini API: {e}")
+            fallback = "I'm sorry, I couldn't find that information right now. Please reach out to our customer support team for help."
+            yield {"event": "token", "delta": fallback}
+            yield {"event": "done", "answer": fallback}
 
     def _generate_mock_response(
         self,

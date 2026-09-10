@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (SurfacesTilesBot/1.0)"
 
     # RAG Settings
-    top_k: int = 10
+    top_k: int = Field(default=4, validation_alias="TOP_K")
     score_threshold: float = 0.2
     max_chat_history: int = Field(default=10, validation_alias="MAX_CHAT_HISTORY")
 
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         default=BASE_DIR / "data" / "audio",
         validation_alias=AliasChoices("AUDIO_DIR", "audio_dir")
     )
-    stt_model: str = Field(default="small", validation_alias="STT_MODEL")
+    stt_model: str = Field(default="base.en", validation_alias="STT_MODEL")
     stt_device: str = Field(default="cpu", validation_alias="STT_DEVICE")
     stt_compute_type: str = Field(default="int8", validation_alias="STT_COMPUTE_TYPE")
     stt_language: str = Field(default="en", validation_alias="STT_LANGUAGE")

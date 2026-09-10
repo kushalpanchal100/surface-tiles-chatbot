@@ -1,6 +1,7 @@
 import time
 import logging
-from typing import List, Optional
+import threading
+from typing import List, Optional, Dict
 import numpy as np
 
 from config.settings import settings
@@ -23,6 +24,9 @@ class GeminiEmbeddingService:
         self.batch_size = batch_size
         self.mock_mode = mock_mode or not bool(self.api_key and self.api_key != "your_gemini_api_key_here")
         self.client = None
+        self._query_cache: Dict[str, List[float]] = {}
+        self._cache_lock = threading.Lock()
+        self._max_cache_size = 1000
 
         if not self.mock_mode:
             try:
@@ -36,11 +40,24 @@ class GeminiEmbeddingService:
             logger.info("Operating GeminiEmbeddingService in mock/offline mode.")
 
     def embed_text(self, text: str) -> List[float]:
-        """Generate embedding for a single text query."""
+        """Generate embedding for a single text query with in-memory caching."""
         if not text or not str(text).strip():
             return []
+
+        key = str(text).strip().lower()
+        with self._cache_lock:
+            if key in self._query_cache:
+                return self._query_cache[key]
+
         results = self.embed_batch([str(text).strip()])
-        return results[0] if results else []
+        if results and results[0]:
+            with self._cache_lock:
+                if len(self._query_cache) >= self._max_cache_size:
+                    first_key = next(iter(self._query_cache))
+                    del self._query_cache[first_key]
+                self._query_cache[key] = results[0]
+            return results[0]
+        return []
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for a list of texts in batches."""
