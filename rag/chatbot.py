@@ -173,11 +173,12 @@ class SurfacesChatbot:
                         top_source = sources[0]
                         ctype = (top_source.get("content_type") or "").lower()
                         if ctype == "product":
-                            price_str = f" – {top_source['price']}" if top_source.get('price') else ""
+                            price_str = f" — {top_source['price']}" if top_source.get('price') else ""
+                            size_str = f" — {top_source['size']}" if top_source.get('size') else ""
                             answer = (
-                                f"Here is a great option from our catalog:\n\n"
-                                f"- **[{top_source['title']}]({top_source['url']})**{price_str}\n\n"
-                                f"Would you like to know more about this tile or order a free sample?"
+                                f"Here is the best matching option:\n\n"
+                                f"1. **[{top_source['title']}]({top_source['url']})**{price_str}{size_str}\n\n"
+                                f"Would you like me to recommend the best one for your room?"
                             )
                         else:
                             answer = (
@@ -192,7 +193,7 @@ class SurfacesChatbot:
                         elif any(lower_m == g or lower_m.startswith(f"{g} ") or lower_m.startswith(f"{g}!") or lower_m.startswith(f"{g},") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
                             answer = "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you today?"
                         else:
-                            answer = "I'm sorry, I couldn't find that information on our website. Please reach out to our customer support team or visit surfacestiles.co.uk!"
+                            answer = "I'm sorry, I couldn't find that in our catalogue. Could you let me know the colour, size, or room you're looking to tile?"
                     break
 
         return {
@@ -220,12 +221,12 @@ class SurfacesChatbot:
         if not sources:
             if history:
                 return (
-                    "Thank you for following up! For specific custom specifications or items outside our online catalog, "
-                    "our UK tile specialists would be delighted to help directly. Please reach out to contact@surfacestiles.co.uk."
+                    "I don't have that specific item in our online catalogue, but our team can help source it. "
+                    "Would you like to explore similar styles or contact our sales team directly?"
                 )
             return (
-                "I'm sorry, I couldn't find any matching products or policies on our website. "
-                "Please visit surfacestiles.co.uk or contact our support team for assistance!"
+                "I'm sorry, I couldn't find matching tiles in our online catalogue. "
+                "Could you tell me what room or colour you are looking for so I can suggest the best options?"
             )
 
         # Extract top 2-3 matching items
@@ -237,14 +238,15 @@ class SurfacesChatbot:
             ctype = (s.get("content_type") or "").lower()
             if ctype == "product":
                 has_products = True
-                price = f" – {s['price']}" if s.get("price") else ""
-                items.append(f"- **[{title}]({url})**{price}")
+                price = f" — {s['price']}" if s.get("price") else ""
+                size = f" — {s['size']}" if s.get("size") else ""
+                items.append(f"{len(items) + 1}. **[{title}]({url})**{price}{size}")
             else:
                 items.append(f"- **[{title}]({url})**")
 
         if has_products:
-            intro = "Following on from our conversation, here are matching options:" if history else "Here are a few popular options that might suit what you're looking for:"
-            closing = "We offer free samples across our porcelain range so you can see the colour and texture at home. Would you like any extra details on these?"
+            intro = "Here are the best matching options:" if not history else "Following on from our conversation, here are the best matching options:"
+            closing = "Would you like me to recommend the best one for your room?"
         else:
             intro = "Here is the relevant information from our website:"
             closing = "Please let me know if you would like any further details or assistance!"
