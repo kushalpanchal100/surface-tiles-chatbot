@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List
 
 from config.settings import settings
 from rag.retriever import SurfacesRetriever
-from rag.prompt import SURFACES_TILES_SYSTEM_PROMPT, build_rag_prompt
+from rag.prompt import SURFACES_TILES_SYSTEM_PROMPT, build_rag_prompt, WELCOME_MESSAGE
 from rag.product_catalog import catalog
 
 logger = logging.getLogger(__name__)
@@ -41,30 +41,12 @@ class SurfacesChatbot:
         If the current message appears to be a follow-up referring to prior items,
         enrich the retrieval query with recent customer or product context from history.
         """
-        if not history:
-            return message
+        clean_msg = (message or "").strip()
+        if not clean_msg or not history:
+            return clean_msg
 
-        clean_msg = message.strip()
         lower_msg = clean_msg.lower()
         words = lower_msg.split()
-
-        # Ignore greetings, closings, and name queries from follow-up enrichment
-        greetings_and_closings = {
-            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
-            "thanks", "thank you", "cheers", "bye", "goodbye", "ok", "okay"
-        }
-        name_queries = {
-            "what is your name", "what's your name", "whats your name",
-            "who are you", "what is your name?", "what's your name?",
-            "whats your name?", "who are you?", "your name"
-        }
-        if (
-            lower_msg in greetings_and_closings
-            or lower_msg in name_queries
-            or (len(words) <= 2 and any(g in lower_msg for g in greetings_and_closings))
-            or any(nq in lower_msg for nq in ["what is your name", "what's your name", "who are you"])
-        ):
-            return message
 
         recent_turns = history[-4:]
         context_cues = []
@@ -114,41 +96,6 @@ class SurfacesChatbot:
                 return f"{clean_msg} {recent_context}".strip()
 
         return clean_msg
-
-    def _check_fast_path(self, message: str) -> Optional[str]:
-        """Detect standard conversational greetings, identity questions, or closings.
-        
-        Returns an instant, pre-defined natural response in < 1ms, completely bypassing
-        vector retrieval and remote LLM execution.
-        """
-        clean_msg = (message or "").strip().lower()
-        clean_msg_nopunct = re.sub(r"[!?,.]+$", "", clean_msg).strip()
-
-        # 1. Name & identity inquiries
-        name_queries = {
-            "what is your name", "what's your name", "whats your name",
-            "who are you", "tell me your name", "your name", "who are u"
-        }
-        if clean_msg_nopunct in name_queries or any(clean_msg_nopunct.startswith(nq) for nq in ["what is your name", "what's your name", "whats your name", "who are you"]):
-            return "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
-
-        # 2. Greetings
-        greetings = {
-            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
-            "hello sophie", "hi sophie", "hey sophie", "greetings"
-        }
-        if clean_msg_nopunct in greetings or any(clean_msg_nopunct == g or clean_msg_nopunct.startswith(f"{g} ") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
-            return "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you find the right tiles today?"
-
-        # 3. Closings & Gratitude
-        closings = {
-            "thanks", "thank you", "thank you so much", "thanks a lot", "thanks sophie",
-            "thank you sophie", "cheers", "bye", "goodbye", "see you", "have a good day"
-        }
-        if clean_msg_nopunct in closings or any(clean_msg_nopunct.startswith(c) for c in ["thank you", "thanks", "cheers", "goodbye"]):
-            return "You're very welcome! If you have any further questions about our tiles, delivery, or free samples, feel free to ask. Have a great day!"
-
-        return None
 
     def _is_general_info_or_policy_query(self, message: str) -> bool:
         """Check if message is an informational, store location, or policy question.
@@ -211,6 +158,11 @@ class SurfacesChatbot:
         Basic informational queries (location, store address, hours, contact, general
         delivery/return policies) return NO product cards.
         """
+        # 0. If the model response is or contains the static welcome message, do not display product cards
+        clean_ans = (answer or "").strip()
+        if WELCOME_MESSAGE in clean_ans or clean_ans == WELCOME_MESSAGE:
+            return []
+
         # 1. If basic informational / store / policy query, do not show product cards
         if self._is_general_info_or_policy_query(message):
             return []
@@ -301,15 +253,6 @@ class SurfacesChatbot:
         top_k: Optional[int] = None
     ) -> Dict[str, Any]:
         """Execute full RAG generation: retrieve website context -> call Gemini LLM -> return response."""
-        # 0. Fast-path check for greetings, name inquiries, and pleasantries (< 5ms response)
-        fast_answer = self._check_fast_path(message)
-        if fast_answer:
-            return {
-                "answer": fast_answer,
-                "sources": [],
-                "products": []
-            }
-
         # Ensure history is clamped to max configured limit (default: 10)
         max_hist = getattr(settings, "max_chat_history", 10)
         active_history = history[-max_hist:] if history else []
@@ -324,7 +267,7 @@ class SurfacesChatbot:
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
-        # 2. Build prompt including up to 10 history messages
+        # 2. Build prompt including prior history messages and dynamic intent instructions
         prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
 
         # 3. Generate response using Gemini
@@ -375,14 +318,17 @@ class SurfacesChatbot:
                                 f"Please feel free to ask if you need further help!"
                             )
                     else:
-                        lower_m = message.strip().lower()
-                        if any(nq in lower_m for nq in ["what is your name", "what's your name", "whats your name", "who are you", "your name"]):
-                            answer = "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
-                        elif any(lower_m == g or lower_m.startswith(f"{g} ") or lower_m.startswith(f"{g}!") or lower_m.startswith(f"{g},") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
-                            answer = "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you today?"
-                        else:
-                            answer = "I'm sorry, I couldn't find that in our catalogue. Could you let me know the colour, size, or room you're looking to tile?"
+                        answer = "I'm sorry, I couldn't find that in our catalogue. Could you let me know the colour, size, or room you're looking to tile?"
                     break
+
+        clean_answer = (answer or "").strip()
+        if (
+            WELCOME_MESSAGE in clean_answer
+            or clean_answer == WELCOME_MESSAGE
+            or "Sophie, the AI assistant for Surfaces Tiles UK" in clean_answer
+            or "You're very welcome" in clean_answer
+        ):
+            sources = []
 
         products = self._resolve_product_cards(message, sources, answer)
 
@@ -401,20 +347,11 @@ class SurfacesChatbot:
     ):
         """Streaming generator that yields chunks for Server-Sent Events (SSE).
         Yields:
+            {"event": "token", "delta": "..."}
             {"event": "sources", "sources": [...]}
             {"event": "products", "products": [...]}
-            {"event": "token", "delta": "..."}
             {"event": "done", "answer": "..."}
         """
-        # Fast-path check
-        fast_answer = self._check_fast_path(message)
-        if fast_answer:
-            yield {"event": "sources", "sources": []}
-            yield {"event": "products", "products": []}
-            yield {"event": "token", "delta": fast_answer}
-            yield {"event": "done", "answer": fast_answer}
-            return
-
         max_hist = getattr(settings, "max_chat_history", 10)
         active_history = history[-max_hist:] if history else []
 
@@ -427,50 +364,68 @@ class SurfacesChatbot:
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
-        # Emit sources and preliminary products
-        initial_products = self._resolve_product_cards(message, sources, "")
-        yield {"event": "sources", "sources": sources}
-        yield {"event": "products", "products": initial_products}
-
         prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
 
         if self.mock_mode or not self.client:
             answer = self._generate_mock_response(message, retrieval_result, active_history)
-            final_products = self._resolve_product_cards(message, sources, answer)
-            if len(final_products) > len(initial_products):
-                yield {"event": "products", "products": final_products}
+            final_sources = [] if (
+                WELCOME_MESSAGE in answer
+                or "Sophie, the AI assistant for Surfaces Tiles UK" in answer
+                or "You're very welcome" in answer
+            ) else sources
+            final_products = self._resolve_product_cards(message, final_sources, answer)
+            yield {"event": "sources", "sources": final_sources}
+            yield {"event": "products", "products": final_products}
             yield {"event": "token", "delta": answer}
             yield {"event": "done", "answer": answer}
             return
 
         from google.genai import types
         accumulated_text = []
-        try:
-            stream = self.client.models.generate_content_stream(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
-                    temperature=0.3,
-                    max_output_tokens=250,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+        for attempt in range(2):
+            try:
+                stream = self.client.models.generate_content_stream(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
+                        temperature=0.3,
+                        max_output_tokens=250,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                    )
                 )
-            )
-            for chunk in stream:
-                if chunk and chunk.text:
-                    accumulated_text.append(chunk.text)
-                    yield {"event": "token", "delta": chunk.text}
+                for chunk in stream:
+                    if chunk and chunk.text:
+                        accumulated_text.append(chunk.text)
+                        yield {"event": "token", "delta": chunk.text}
 
-            full_answer = "".join(accumulated_text)
-            final_products = self._resolve_product_cards(message, sources, full_answer)
-            if len(final_products) > len(initial_products):
+                full_answer = "".join(accumulated_text)
+                final_sources = [] if (
+                    WELCOME_MESSAGE in full_answer
+                    or "Sophie, the AI assistant for Surfaces Tiles UK" in full_answer
+                    or "You're very welcome" in full_answer
+                ) else sources
+                final_products = self._resolve_product_cards(message, final_sources, full_answer)
+                yield {"event": "sources", "sources": final_sources}
                 yield {"event": "products", "products": final_products}
-            yield {"event": "done", "answer": full_answer}
-        except Exception as e:
-            logger.error(f"Error streaming from Gemini API: {e}")
-            fallback = "I'm sorry, I couldn't find that information right now. Please reach out to our customer support team for help."
-            yield {"event": "token", "delta": fallback}
-            yield {"event": "done", "answer": fallback}
+                yield {"event": "done", "answer": full_answer}
+                return
+            except Exception as e:
+                err_str = str(e)
+                is_transient = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str or "timeout" in err_str.lower()
+                if is_transient and attempt == 0:
+                    logger.warning(f"Transient error streaming from Gemini API ({e}). Retrying once...")
+                    import time
+                    time.sleep(2.0)
+                    continue
+
+                logger.error(f"Error streaming from Gemini API: {e}")
+                fallback = "I'm sorry, I couldn't find that information right now. Please reach out to our customer support team for help."
+                yield {"event": "sources", "sources": []}
+                yield {"event": "products", "products": []}
+                yield {"event": "token", "delta": fallback}
+                yield {"event": "done", "answer": fallback}
+                return
 
     def _generate_mock_response(
         self,
@@ -478,16 +433,15 @@ class SurfacesChatbot:
         retrieval_result: Dict[str, Any],
         history: Optional[List[Any]] = None
     ) -> str:
-        """Generate a grounded mock response when running in demo/offline mode."""
+        """Generate a grounded mock response when running in demo/offline mode without API key."""
         sources = retrieval_result.get("sources", [])
-
         lower_msg = (message or "").strip().lower()
 
         # Handle direct name inquiries and greetings in mock/offline mode
-        if any(nq in lower_msg for nq in ["what is your name", "what's your name", "whats your name", "who are you", "your name"]):
+        if any(nq in lower_msg for nq in ["what is your name", "what's your name", "who are you"]):
             return "Hello! I'm Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?"
-        if any(lower_msg == g or lower_msg.startswith(f"{g} ") or lower_msg.startswith(f"{g}!") or lower_msg.startswith(f"{g},") for g in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
-            return "Hello! I'm Sophie from Surfaces Tiles UK. How can I help you today?"
+        if lower_msg in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hiya", "howdy"]:
+            return WELCOME_MESSAGE
 
         if not sources:
             if history:
