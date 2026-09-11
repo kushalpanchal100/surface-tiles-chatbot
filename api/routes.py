@@ -474,6 +474,108 @@ async def voice_chat_endpoint(
         raise HTTPException(status_code=500, detail=f"Internal voice chat error: {str(e)}")
 
 
+@router.post("/voice/chat/stream", summary="Low-Latency Streaming Voice Chat via Server-Sent Events (SSE)")
+async def voice_chat_stream_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    chatbot: SurfacesChatbot = Depends(get_chatbot),
+    voice_service: VoiceAssistantService = Depends(get_voice_service)
+):
+    """Customer-facing real-time streaming voice chat endpoint using Server-Sent Events (SSE).
+    
+    Accepts user audio (via multipart/form-data or application/json base64),
+    transcribes it with Faster-Whisper, and immediately streams user transcript,
+    token deltas, sentence-by-sentence synthesized audio MP3 chunks, and product recommendations.
+    """
+    interaction_time = datetime.now()
+    audio_bytes: Optional[bytes] = None
+    session_id: Optional[str] = None
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("audio") or form.get("file")
+        session_id = form.get("session_id")
+        if upload and hasattr(upload, "read"):
+            audio_bytes = await upload.read()
+    elif "application/json" in content_type:
+        body = await request.json()
+        session_id = body.get("session_id")
+        raw_b64 = body.get("audio_base64") or body.get("audio") or ""
+        if "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        if raw_b64:
+            audio_bytes = base64.b64decode(raw_b64)
+    else:
+        raw_body = await request.body()
+        if raw_body:
+            audio_bytes = raw_body
+
+    if not audio_bytes or len(audio_bytes) < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid audio data provided or audio file is empty."
+        )
+
+    # Validate or generate session UUID
+    if not session_id or not str(session_id).strip():
+        session_id = str(uuid.uuid4())
+    else:
+        try:
+            session_id = str(uuid.UUID(str(session_id).strip()))
+        except (ValueError, AttributeError):
+            session_id = str(uuid.uuid4())
+
+    async def sse_event_generator():
+        last_transcript = ""
+        last_answer = ""
+        timings = {}
+        try:
+            async for chunk in voice_service.stream_voice_chat(
+                audio_input=audio_bytes,
+                session_id=session_id,
+                chatbot=chatbot
+            ):
+                event_name = chunk.get("event", "message")
+                if event_name == "transcript":
+                    last_transcript = chunk.get("text", "")
+                elif event_name == "done":
+                    last_answer = chunk.get("answer", "")
+                    timings = chunk.get("timings", {})
+
+                yield f"event: {event_name}\ndata: {json.dumps(chunk)}\n\n"
+
+            # Log interaction in background after streaming completes
+            internal_details = {
+                "status_code": 200,
+                "session_id": session_id,
+                "mode": "voice_stream",
+                "timings": timings
+            }
+            log_interaction_background(
+                background_tasks=background_tasks,
+                user_input=f"[VOICE STREAM] {last_transcript}",
+                internal_response=internal_details,
+                ai_response=last_answer,
+                user_response={"transcript": last_transcript, "answer": last_answer, "timings": timings},
+                timestamp=interaction_time
+            )
+        except Exception as err:
+            logger.error(f"Error during voice stream: {err}", exc_info=True)
+            err_payload = {"event": "error", "error": str(err)}
+            yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+
+    return StreamingResponse(
+        sse_event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @router.post("/voice/transcribe", response_model=TranscribeResponse, summary="Transcribe Audio to Text (STT Only)")
 async def voice_transcribe_endpoint(
     request: Request,

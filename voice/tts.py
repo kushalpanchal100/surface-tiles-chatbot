@@ -89,6 +89,17 @@ def clean_text_for_speech(text: str) -> str:
     return cleaned.strip()
 
 
+def split_sentences(text: str) -> list[str]:
+    """Split text into natural spoken sentences for chunked audio streaming."""
+    if not text:
+        return []
+    cleaned = clean_text_for_speech(text)
+    if not cleaned:
+        return []
+    raw = re.split(r'(?<=[.?!])\s+', cleaned)
+    return [s.strip() for s in raw if s.strip()]
+
+
 class BaseTTSService(ABC):
     """Abstract base class for Text-to-Speech services."""
 

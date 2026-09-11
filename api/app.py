@@ -31,6 +31,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Error during startup log cleanup: {e}")
 
+    # Pre-warm Voice STT model in background executor to eliminate first-request cold-start latency
+    try:
+        import asyncio
+        from voice import get_stt_service
+        stt = get_stt_service()
+        if hasattr(stt, "warm_up"):
+            asyncio.get_event_loop().run_in_executor(None, stt.warm_up)
+    except Exception as e:
+        logger.warning(f"Voice service warm-up skipped: {e}")
+
     yield
     logger.info("Shutting down Surfaces Tiles UK Chatbot API...")
 
@@ -80,6 +90,7 @@ def root():
             "chat": "POST /chat",
             "chat_stream": "POST /chat/stream",
             "voice_chat": "POST /voice/chat",
+            "voice_chat_stream": "POST /voice/chat/stream",
             "voice_transcribe": "POST /voice/transcribe",
             "voice_synthesize": "POST /voice/synthesize",
             "products": "GET /products",

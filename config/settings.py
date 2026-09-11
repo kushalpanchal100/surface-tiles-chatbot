@@ -57,13 +57,14 @@ class Settings(BaseSettings):
         default=BASE_DIR / "data" / "audio",
         validation_alias=AliasChoices("AUDIO_DIR", "audio_dir")
     )
-    stt_model: str = Field(default="base.en", validation_alias="STT_MODEL")
+    stt_model: str = Field(default="tiny.en", validation_alias="STT_MODEL")
     stt_device: str = Field(default="cpu", validation_alias="STT_DEVICE")
     stt_compute_type: str = Field(default="int8", validation_alias="STT_COMPUTE_TYPE")
     stt_language: str = Field(default="en", validation_alias="STT_LANGUAGE")
     stt_cpu_threads: int = Field(default=4, validation_alias="STT_CPU_THREADS")
     stt_beam_size: int = Field(default=1, validation_alias="STT_BEAM_SIZE")
     stt_vad_filter: bool = Field(default=True, validation_alias="STT_VAD_FILTER")
+    stt_min_silence_duration_ms: int = Field(default=300, validation_alias="STT_MIN_SILENCE_DURATION_MS")
 
     tts_enabled: bool = Field(default=True, validation_alias="TTS_ENABLED")
     tts_voice: str = Field(default="en-GB-SoniaNeural", validation_alias="TTS_VOICE")

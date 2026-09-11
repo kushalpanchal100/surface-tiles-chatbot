@@ -77,6 +77,14 @@ class FasterWhisperSTTService(BaseSTTService):
                     logger.info(f"Faster-Whisper model loaded in {load_duration:.2f}s")
         return self._model
 
+    def warm_up(self):
+        """Warm up the Whisper model in background/startup."""
+        try:
+            self._get_model()
+            logger.info("Faster-Whisper STT service pre-warmed and ready.")
+        except Exception as e:
+            logger.warning(f"Faster-Whisper pre-warm encountered an issue: {e}")
+
     def transcribe(
         self,
         audio_input: Union[str, Path, bytes, BinaryIO],
@@ -84,38 +92,39 @@ class FasterWhisperSTTService(BaseSTTService):
     ) -> Dict[str, Any]:
         """Transcribe an audio file, bytes buffer, or binary stream.
         
-        Optimized for CPU:
+        Optimized for ultra-low latency on CPU:
         - compute_type='int8' quantization
-        - vad_filter=True (Silero VAD) to strip leading/trailing silence and speed up inference
-        - beam_size=1 (greedy search) for low latency
-        - language fixed to 'en' (or specified language)
+        - In-memory stream decoding via io.BytesIO (no disk I/O)
+        - vad_filter=True with tuned min_silence_duration_ms
+        - beam_size=1 (greedy search)
+        - without_timestamps=True and condition_on_previous_text=False
+        - temperature=0.0
         """
         model = self._get_model()
         target_lang = language or self.default_language
 
         temp_file_path = None
         try:
-            # Handle input types: if raw bytes or file-like, write to a temp file for PyAV decoding
+            # Handle input types: use in-memory stream to avoid disk temporary file I/O
             if isinstance(audio_input, (bytes, bytearray)):
-                with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tf:
-                    tf.write(audio_input)
-                    temp_file_path = tf.name
-                file_to_process = temp_file_path
+                file_to_process = io.BytesIO(audio_input)
             elif hasattr(audio_input, "read"):
-                with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tf:
-                    tf.write(audio_input.read())
-                    temp_file_path = tf.name
-                file_to_process = temp_file_path
+                raw = audio_input.read()
+                file_to_process = io.BytesIO(raw) if isinstance(raw, (bytes, bytearray)) else raw
             else:
                 file_to_process = str(audio_input)
 
             start_time = time.time()
+            min_silence = getattr(settings, "stt_min_silence_duration_ms", 300)
             segments, info = model.transcribe(
                 file_to_process,
                 language=target_lang,
                 beam_size=settings.stt_beam_size,
                 vad_filter=settings.stt_vad_filter,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                vad_parameters=dict(min_silence_duration_ms=min_silence),
+                without_timestamps=True,
+                condition_on_previous_text=False,
+                temperature=0.0,
                 task="transcribe"
             )
 
@@ -123,12 +132,14 @@ class FasterWhisperSTTService(BaseSTTService):
             text_segments = []
             segment_details = []
             for seg in segments:
-                text_segments.append(seg.text.strip())
-                segment_details.append({
-                    "start": round(seg.start, 2),
-                    "end": round(seg.end, 2),
-                    "text": seg.text.strip()
-                })
+                clean_seg = seg.text.strip()
+                if clean_seg:
+                    text_segments.append(clean_seg)
+                    segment_details.append({
+                        "start": round(seg.start, 2),
+                        "end": round(seg.end, 2),
+                        "text": clean_seg
+                    })
 
             full_text = " ".join(text_segments).strip()
             elapsed_time = time.time() - start_time
@@ -151,7 +162,6 @@ class FasterWhisperSTTService(BaseSTTService):
             logger.error(f"Error during Faster-Whisper transcription: {e}", exc_info=True)
             raise
         finally:
-            # Clean up temp file if created
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)
