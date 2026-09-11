@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices
@@ -65,6 +66,7 @@ class Settings(BaseSettings):
     stt_beam_size: int = Field(default=1, validation_alias="STT_BEAM_SIZE")
     stt_vad_filter: bool = Field(default=True, validation_alias="STT_VAD_FILTER")
     stt_min_silence_duration_ms: int = Field(default=300, validation_alias="STT_MIN_SILENCE_DURATION_MS")
+    hf_token: Optional[str] = Field(default=None, validation_alias=AliasChoices("HF_TOKEN", "HUGGINGFACE_TOKEN"))
 
     tts_enabled: bool = Field(default=True, validation_alias="TTS_ENABLED")
     tts_voice: str = Field(default="en-GB-SoniaNeural", validation_alias="TTS_VOICE")

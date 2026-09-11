@@ -66,13 +66,29 @@ class FasterWhisperSTTService(BaseSTTService):
                         f"(compute_type={self.compute_type}, threads={self.cpu_threads})..."
                     )
                     start_time = time.time()
-                    self._model = WhisperModel(
-                        self.model_size,
-                        device=self.device,
-                        compute_type=self.compute_type,
-                        cpu_threads=self.cpu_threads,
-                        num_workers=1
-                    )
+                    hf_token = getattr(settings, "hf_token", None) or os.environ.get("HF_TOKEN")
+                    try:
+                        # Try loading from local cache first for instant startup without network roundtrips or HF Hub warnings
+                        self._model = WhisperModel(
+                            self.model_size,
+                            device=self.device,
+                            compute_type=self.compute_type,
+                            cpu_threads=self.cpu_threads,
+                            num_workers=1,
+                            local_files_only=True
+                        )
+                    except Exception:
+                        # Fallback to remote download if model is not yet cached locally
+                        logger.info(f"Model '{self.model_size}' not in local cache, downloading from Hugging Face Hub...")
+                        self._model = WhisperModel(
+                            self.model_size,
+                            device=self.device,
+                            compute_type=self.compute_type,
+                            cpu_threads=self.cpu_threads,
+                            num_workers=1,
+                            local_files_only=False,
+                            use_auth_token=hf_token
+                        )
                     load_duration = time.time() - start_time
                     logger.info(f"Faster-Whisper model loaded in {load_duration:.2f}s")
         return self._model
