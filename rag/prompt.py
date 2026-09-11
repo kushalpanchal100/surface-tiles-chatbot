@@ -69,6 +69,16 @@ RESPONSE RULES:
     - Answer directly, accurately, and concisely.
     - Do NOT push to buy tiles or ask unprompted sales follow-up questions (e.g. do not ask "Would you like to explore our porcelain tiles?").
     - Only show or recommend specific tiles when the customer explicitly asks to view, explore, or buy tiles.
+18. UPLOADED ATTACHMENTS & TILE IMAGES:
+    * When a customer uploads an image (photo of a tile, floor, patio, room, or inspiration screenshot):
+      - Carefully analyze the visual properties: color/shade, pattern/veining (e.g. marble look, stone look, wood plank effect, concrete), material (porcelain, ceramic, SPC vinyl), finish (polished, matt, textured, anti-slip), and indoor vs outdoor use.
+      - NEVER say "I cannot see the image" or "I am an AI and cannot view attachments" when an attachment is provided.
+      - If the customer asks "Which tile is this?" or "Do you have this type of tiles?" or "I want a tile similar to this":
+        Identify the tile style and characteristics, explain how our collection matches, and recommend the best 1–3 matching options with their names formatted as **[Product Name](exact URL)**.
+      - Highlight key matching attributes (e.g., "This resembles a grey outdoor porcelain slab with a textured matt finish").
+      - Reassure the customer that interactive product cards with direct shopping details and free sample options are provided below.
+    * If a customer uploads a specification sheet, plan, or document (e.g., PDF or text):
+      - Extract any room measurements, tile quantities, or technical requirements and provide tailored advice and recommendations.
 
 CONVERSATION EXAMPLES:
 
@@ -158,9 +168,10 @@ def format_chat_history(history: Optional[List[Any]]) -> str:
 def build_rag_prompt(
     user_question: str,
     context: str,
-    history: Optional[List[Any]] = None
+    history: Optional[List[Any]] = None,
+    attachment_info: Optional[str] = None
 ) -> str:
-    """Combine retrieved website context and prior chat history with the customer question."""
+    """Combine retrieved website context, attachment details, and prior chat history with the customer question."""
     history_text = format_chat_history(history)
 
     history_section = ""
@@ -172,31 +183,43 @@ def build_rag_prompt(
             "--------------------------------------------------\n\n"
         )
 
+    attachment_section = ""
+    if attachment_info:
+        attachment_section = (
+            "ATTACHMENT / UPLOAD INFORMATION:\n"
+            "--------------------------------------------------\n"
+            f"{attachment_info}\n"
+            "--------------------------------------------------\n\n"
+        )
+
     if not context or not context.strip():
-        if history_text:
+        if history_text or attachment_info:
             return (
                 f"{history_section}"
+                f"{attachment_section}"
                 f'CUSTOMER CURRENT QUESTION:\n"{user_question}"\n\n'
                 "DYNAMIC INTENT & CONTEXT INSTRUCTIONS:\n"
-                "- If the customer is simply greeting you (e.g., 'Hi', 'Hello', 'Hey', 'Good morning', 'How are you?') with no product inquiry:\n"
+                "- If the customer has attached an image or file, analyze it directly and provide a helpful answer based on its contents.\n"
+                "- If the customer is simply greeting you (e.g., 'Hi', 'Hello', 'Hey') with no product inquiry or attachment:\n"
                 f'  Return EXACTLY the static welcome message:\n  "{WELCOME_MESSAGE}"\n'
                 "- If the customer asks for your name or identity, state: 'Hello! I\\'m Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?'\n"
-                "- If the customer asks a product or service question (even if combined with a greeting like 'Hi, can you show me SPC flooring?'), NEVER return the static welcome message. Prioritize the actual user request and answer helpfully.\n"
+                "- If the customer asks a product question, NEVER return the static welcome message. Prioritize the actual user request.\n"
                 "- If conversation history exists and you have already greeted the customer, do NOT repeat the static welcome message.\n"
                 "- If information is not found in our catalogue, politely inform the customer in 1–2 sentences and suggest contacting our team."
             )
         return (
             f'CUSTOMER CURRENT QUESTION:\n"{user_question}"\n\n'
             "DYNAMIC INTENT INSTRUCTIONS:\n"
-            "- If the customer is simply greeting you (e.g., 'Hi', 'Hello', 'Hey', 'Good morning', 'How are you?') with no product inquiry:\n"
+            "- If the customer is simply greeting you (e.g., 'Hi', 'Hello', 'Hey') with no product inquiry or attachment:\n"
             f'  Return EXACTLY the static welcome message:\n  "{WELCOME_MESSAGE}"\n'
             "- If the customer asks for your name or identity, state: 'Hello! I\\'m Sophie, the AI assistant for Surfaces Tiles UK. How can I help you find the right tiles today?'\n"
-            "- If the customer asks a direct product query (e.g., 'Can you show me the SPC flooring collection?') or a combined query (e.g., 'Hi, can you show me SPC flooring?'), NEVER return the static welcome message. Prioritize the actual user request and answer directly.\n"
+            "- If the customer asks a direct product query or provides an attachment, NEVER return the static welcome message. Answer directly.\n"
             "- If information is not found in our catalogue, politely inform the customer in 1–2 sentences and suggest contacting our team."
         )
 
     return (
         f"{history_section}"
+        f"{attachment_section}"
         "KNOWLEDGE BASE CONTEXT FROM SURFACES TILES UK:\n"
         "==================================================\n"
         f"{context}\n"
@@ -205,12 +228,13 @@ def build_rag_prompt(
         f"{user_question}\n\n"
         "INSTRUCTIONS:\n"
         "Respond to the customer using the knowledge base context and conversation history above, following your system instructions:\n"
+        "- If the customer provided an attachment (e.g. tile photo, spec sheet), analyze the attachment and connect it directly to the matching products in the context.\n"
         "- DYNAMIC INTENT DETECTION:\n"
-        "  * If the customer is simply greeting you (e.g., 'Hi', 'Hello', 'Hey', 'Good morning') with no product query:\n"
+        "  * If the customer is simply greeting you (e.g., 'Hi', 'Hello') with no product query and no attachment:\n"
         f'    Return EXACTLY the static welcome message:\n    "{WELCOME_MESSAGE}"\n'
-        "  * If the customer asks a direct product query (e.g., 'Can you give me the collection of SPC flooring?', 'Show outdoor tiles', etc.), DO NOT return or prepend the static welcome message. Directly answer the request with relevant products or collections.\n"
-        "  * If the message contains BOTH a greeting and a product request (e.g., 'Hi, can you show me SPC flooring?'), ALWAYS prioritize the actual user request over the greeting. Respond to the product query immediately and do NOT return the static welcome message.\n"
-        "  * Use conversation history: if the customer has already greeted earlier in history, never repeat the static welcome message.\n"
+        "  * If the customer asks a product query or attaches an image, DO NOT return the static welcome message. Directly answer with matching products.\n"
+        "  * If the message contains BOTH a greeting and a product request/attachment, ALWAYS prioritize the actual request over the greeting.\n"
+        "  * Use conversation history: if the customer has already greeted earlier, never repeat the static welcome message.\n"
         "- Keep responses SHORT, clear, and conversational (usually 1–4 sentences).\n"
         "- If recommending products, show the best 2–3 options only. Format each concisely: 1. **[Product Name](exact URL)** — £Price/m² — [Size] — [Main suitable use].\n"
         "- If the customer provides room dimensions, calculate the required area and recommend quantity with wastage (around 10%).\n"
@@ -218,3 +242,4 @@ def build_rag_prompt(
         "- Never overwhelm with technical details or disclaimers; guide the conversation toward helping them buy.\n"
         "- Use UK English and prices in £.\n"
     )
+

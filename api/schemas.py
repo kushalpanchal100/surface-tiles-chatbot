@@ -21,9 +21,16 @@ class ChatMessage(BaseModel):
     }
 
 
+class AttachmentPayload(BaseModel):
+    filename: Optional[str] = Field(default=None, description="Original filename (e.g., photo.jpg, spec.pdf)")
+    mime_type: Optional[str] = Field(default=None, description="MIME type (e.g. image/jpeg, image/png, application/pdf)")
+    data: str = Field(..., description="Base64-encoded file data or data URI string")
+    size: Optional[int] = Field(default=None, description="File size in bytes")
+
+
 class ChatRequest(BaseModel):
-    message: str = Field(
-        ...,
+    message: Optional[str] = Field(
+        default="",
         validation_alias=AliasChoices("message", "query", "text", "prompt"),
         description="The customer question or tile requirement query.",
         examples=["What sizes are available in those?"]
@@ -37,6 +44,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional client-supplied conversation history (overrides or seeds session memory).",
         examples=[[{"role": "user", "content": "Hello"}]]
+    )
+    attachment: Optional[AttachmentPayload] = Field(
+        default=None,
+        description="Optional file attachment (image, PDF, document) with base64 data."
     )
 
     @field_validator("session_id", mode="before")
@@ -58,6 +69,7 @@ class ChatRequest(BaseModel):
             }
         }
     }
+
 
 
 class ProductCardItem(BaseModel):

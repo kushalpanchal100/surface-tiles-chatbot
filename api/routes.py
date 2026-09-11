@@ -129,18 +129,19 @@ def chat_endpoint(
     interaction_time = datetime.now()
     clean_message = (request.message or "").strip()
     session_id = request.session_id
+    attachment = request.attachment
 
-    if not clean_message:
-        error_payload = {"detail": "The 'message' field cannot be empty."}
+    if not clean_message and not attachment:
+        error_payload = {"detail": "Either 'message' or an 'attachment' must be provided."}
         log_interaction_background(
             background_tasks=None,
-            user_input=request.message or "",
-            internal_response={"status_code": 400, "validation_error": "Empty message"},
+            user_input="",
+            internal_response={"status_code": 400, "validation_error": "Empty message and no attachment"},
             ai_response="None (Validation error)",
             user_response=error_payload,
             timestamp=interaction_time,
         )
-        raise HTTPException(status_code=400, detail="The 'message' field cannot be empty.")
+        raise HTTPException(status_code=400, detail="Either 'message' or an 'attachment' must be provided.")
 
     # Resolve chat history:
     # 1. If explicit client-provided history is given, use it (and seed session memory)
@@ -155,7 +156,8 @@ def chat_endpoint(
     try:
         result = chatbot.answer_question(
             message=clean_message,
-            history=resolved_history
+            history=resolved_history,
+            attachment=attachment
         )
 
         response_text = result.get("answer", "")
@@ -192,7 +194,7 @@ def chat_endpoint(
         # Update session memory
         updated_history = session_manager.add_turn(
             session_id=session_id,
-            user_message=clean_message,
+            user_message=clean_message or (f"[Attached: {attachment.filename}]" if attachment and attachment.filename else "[Attached file]"),
             assistant_response=response_text
         )
 
@@ -219,11 +221,16 @@ def chat_endpoint(
             "retrieved_sources": raw_sources,
             "products_count": len(formatted_products),
         }
+        if attachment:
+            internal_system_details["has_attachment"] = True
+            internal_system_details["attachment_filename"] = attachment.filename
+            internal_system_details["attachment_mime_type"] = attachment.mime_type
+            internal_system_details["attachment_size"] = attachment.size
 
         # Asynchronously log the interaction (non-blocking for the client)
         log_interaction_background(
             background_tasks=background_tasks,
-            user_input=clean_message,
+            user_input=clean_message or (f"[Attached: {attachment.filename}]" if attachment and attachment.filename else "[Attachment]"),
             internal_response=internal_system_details,
             ai_response=response_text,
             user_response=chat_response.model_dump(),
@@ -257,9 +264,10 @@ async def chat_stream_endpoint(
     """
     clean_message = (request.message or "").strip()
     session_id = request.session_id
+    attachment = request.attachment
 
-    if not clean_message:
-        raise HTTPException(status_code=400, detail="The 'message' field cannot be empty.")
+    if not clean_message and not attachment:
+        raise HTTPException(status_code=400, detail="Either 'message' or an 'attachment' must be provided.")
 
     resolved_history: List[Any] = []
     if request.history:
@@ -272,7 +280,8 @@ async def chat_stream_endpoint(
         accumulated_answer = []
         for chunk in chatbot.stream_answer_question(
             message=clean_message,
-            history=resolved_history
+            history=resolved_history,
+            attachment=attachment
         ):
             event_type = chunk.get("event")
             if event_type == "sources":
@@ -304,7 +313,7 @@ async def chat_stream_endpoint(
                 full_text = "".join(accumulated_answer)
                 session_manager.add_turn(
                     session_id=session_id,
-                    user_message=clean_message,
+                    user_message=clean_message or (f"[Attached: {attachment.filename}]" if attachment and attachment.filename else "[Attached file]"),
                     assistant_response=full_text
                 )
                 yield f"event: done\ndata: {json.dumps({'status': 'completed', 'session_id': session_id})}\n\n"

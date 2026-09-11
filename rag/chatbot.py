@@ -1,4 +1,5 @@
 import re
+import base64
 import logging
 from typing import Dict, Any, Optional, List
 
@@ -35,6 +36,85 @@ class SurfacesChatbot:
                 self.mock_mode = True
         else:
             logger.info("Operating SurfacesChatbot in mock mode (no API key configured).")
+
+    def _parse_attachment_data(self, attachment: Any) -> tuple[Optional[bytes], str, str]:
+        """Parse filename, mime_type, and raw bytes from attachment payload."""
+        if not attachment:
+            return None, "", ""
+
+        if isinstance(attachment, dict):
+            filename = attachment.get("filename") or "attachment"
+            mime_type = attachment.get("mime_type") or ""
+            raw_data = attachment.get("data") or ""
+        else:
+            filename = getattr(attachment, "filename", None) or "attachment"
+            mime_type = getattr(attachment, "mime_type", None) or ""
+            raw_data = getattr(attachment, "data", None) or ""
+
+        if not raw_data:
+            return None, filename, mime_type
+
+        # Handle data URI: data:<mime_type>;base64,<data>
+        if "," in raw_data and "base64" in raw_data.split(",", 1)[0]:
+            header, encoded = raw_data.split(",", 1)
+            if not mime_type and ":" in header and ";" in header:
+                mime_type = header.split(":", 1)[1].split(";", 1)[0].strip()
+        else:
+            encoded = raw_data
+
+        # Detect mime_type from filename extension if still missing
+        if not mime_type and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()
+            ext_map = {
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "png": "image/png",
+                "webp": "image/webp",
+                "gif": "image/gif",
+                "heic": "image/heic",
+                "pdf": "application/pdf",
+                "txt": "text/plain",
+                "csv": "text/csv"
+            }
+            mime_type = ext_map.get(ext, "application/octet-stream")
+
+        try:
+            data_bytes = base64.b64decode(encoded)
+            return data_bytes, filename, mime_type
+        except Exception as e:
+            logger.warning(f"Failed to decode base64 attachment data: {e}")
+            return None, filename, mime_type
+
+    def _extract_visual_context(self, image_part: Any, user_message: str) -> str:
+        """Analyze tile image with Gemini to extract visual properties and search keywords."""
+        if self.mock_mode or not self.client:
+            return "grey outdoor textured porcelain tile patio stone effect"
+
+        try:
+            from google.genai import types
+            analysis_prompt = (
+                "You are an expert tile specialist for Surfaces Tiles UK. "
+                "Analyze this tile or surface image for product catalog matching. "
+                "In 1-2 concise sentences, state the primary colour, pattern/veining, "
+                "surface finish (matt, polished, textured, anti-slip), material (porcelain, ceramic, marble, wood effect SPC), "
+                "and whether it is suitable for indoor walls/floors or outdoor patio paving slabs. "
+                "End with 3-5 search keywords to search in a tile catalog."
+            )
+            resp = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[analysis_prompt, image_part],
+                config=types.GenerateContentConfig(
+                    max_output_tokens=120,
+                    temperature=0.2,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                )
+            )
+            if resp and resp.text:
+                return resp.text.strip()
+        except Exception as e:
+            logger.warning(f"Error extracting visual context from image: {e}")
+        return ""
+
 
     def _build_retrieval_query(self, message: str, history: Optional[List[Any]] = None) -> str:
         """
@@ -146,25 +226,28 @@ class SurfacesChatbot:
         self,
         message: str,
         sources: List[Dict[str, Any]],
-        answer: str = ""
+        answer: str = "",
+        has_attachment: bool = False,
+        visual_query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Extract and resolve standardized tile product cards for rich display.
         
-        Cards are ONLY returned when the user expresses clear product shopping intent:
+        Cards are returned when the user expresses product shopping intent or attaches a file:
         - Wants to buy/purchase/order a tile
         - Asks to show/browse/view tiles or tile recommendations
         - Inquires about a specific tile product or style
+        - Uploaded an attachment (tile image or spec)
         
         Basic informational queries (location, store address, hours, contact, general
-        delivery/return policies) return NO product cards.
+        delivery/return policies) return NO product cards unless an attachment is provided.
         """
         # 0. If the model response is or contains the static welcome message, do not display product cards
         clean_ans = (answer or "").strip()
         if WELCOME_MESSAGE in clean_ans or clean_ans == WELCOME_MESSAGE:
             return []
 
-        # 1. If basic informational / store / policy query, do not show product cards
-        if self._is_general_info_or_policy_query(message):
+        # 1. If basic informational / store / policy query, do not show product cards (unless attachment provided)
+        if not has_attachment and self._is_general_info_or_policy_query(message):
             return []
 
         lower_msg = (message or "").lower()
@@ -176,15 +259,15 @@ class SurfacesChatbot:
         ])
         is_show_intent = any(w in lower_msg for w in [
             "show", "browse", "view", "see", "recommend", "options", "display",
-            "range", "collection", "looking for", "suggest", "find me"
+            "range", "collection", "looking for", "suggest", "find me", "similar", "match", "which tile", "what tile"
         ])
         is_tile_query = any(w in lower_msg for w in [
             "tile", "tiles", "porcelain", "marble", "ceramic", "slab", "slabs",
             "paver", "pavers", "flooring", "wood effect", "stone effect"
         ])
 
-        # If user did NOT express buy intent, show intent, or tile query, do not show cards
-        if not (is_buy_intent or is_show_intent or is_tile_query):
+        # If user did NOT express buy intent, show intent, tile query, or attach a file, do not show cards
+        if not (is_buy_intent or is_show_intent or is_tile_query or has_attachment):
             # Check if user mentioned a specific product title or handle directly
             direct_check = catalog.find(lower_msg)
             if not direct_check:
@@ -228,12 +311,13 @@ class SurfacesChatbot:
                 if p:
                     add_card(catalog.get_product_card(p))
 
-        # 6. If user asked to "show tiles" or "buy" and we still have fewer than 2 cards, search catalog
-        if (is_show_intent or is_buy_intent) and len(cards) < 3:
-            search_query = cleaned_query if (cleaned_query and len(cleaned_query) > 3) else message
-            query_cards = catalog.search(search_query, top_k=4)
-            for qc in query_cards:
-                add_card(qc)
+        # 6. If user asked to "show tiles", "buy", or attached an image and we still have fewer than 3 cards, search catalog
+        if (is_show_intent or is_buy_intent or has_attachment) and len(cards) < 3:
+            search_query = visual_query if (visual_query and len(visual_query) > 3) else (cleaned_query if (cleaned_query and len(cleaned_query) > 3) else message)
+            if search_query:
+                query_cards = catalog.search(search_query, top_k=4)
+                for qc in query_cards:
+                    add_card(qc)
 
         # Pin specific requested product at the beginning if buy intent
         if is_buy_intent and cards:
@@ -250,15 +334,70 @@ class SurfacesChatbot:
         message: str,
         history: Optional[List[Any]] = None,
         category: Optional[str] = None,
-        top_k: Optional[int] = None
+        top_k: Optional[int] = None,
+        attachment: Optional[Any] = None
     ) -> Dict[str, Any]:
         """Execute full RAG generation: retrieve website context -> call Gemini LLM -> return response."""
         # Ensure history is clamped to max configured limit (default: 10)
         max_hist = getattr(settings, "max_chat_history", 10)
         active_history = history[-max_hist:] if history else []
 
-        # 1. Retrieve relevant website context (contextualized if follow-up)
-        retrieval_query = self._build_retrieval_query(message, active_history)
+        # Attachment processing
+        gemini_part = None
+        attachment_info = None
+        visual_summary = ""
+        has_attachment = False
+
+        if attachment:
+            data_bytes, filename, mime_type = self._parse_attachment_data(attachment)
+            if data_bytes:
+                has_attachment = True
+                if mime_type.startswith("image/"):
+                    if not self.mock_mode and self.client:
+                        try:
+                            from google.genai import types
+                            gemini_part = types.Part.from_bytes(data=data_bytes, mime_type=mime_type)
+                            visual_summary = self._extract_visual_context(gemini_part, message)
+                        except Exception as e:
+                            logger.warning(f"Failed to create Gemini image Part: {e}")
+                    else:
+                        visual_summary = "grey outdoor textured porcelain floor tiles patio"
+
+                    attachment_info = (
+                        f"Customer attached an image: '{filename}' ({mime_type}).\n"
+                        f"Visual description & properties: {visual_summary}"
+                    )
+                elif mime_type == "application/pdf":
+                    if not self.mock_mode and self.client:
+                        try:
+                            from google.genai import types
+                            gemini_part = types.Part.from_bytes(data=data_bytes, mime_type="application/pdf")
+                        except Exception as e:
+                            logger.warning(f"Failed to create Gemini PDF Part: {e}")
+                    attachment_info = f"Customer attached a PDF document: '{filename}'."
+                elif mime_type.startswith("text/"):
+                    text_snippet = data_bytes.decode("utf-8", errors="ignore")[:3000]
+                    attachment_info = f"Customer attached text file '{filename}' with content:\n{text_snippet}"
+                else:
+                    return {
+                        "answer": (
+                            f"I received your file '{filename}', but I am currently only able to analyze image files (JPEG, PNG, WebP) "
+                            f"and PDF documents. Please upload a photo of the tile or room, and I'll gladly identify it and recommend matching options!"
+                        ),
+                        "sources": [],
+                        "products": []
+                    }
+
+        # If user only uploaded an attachment without query text, default to a helpful identification prompt
+        effective_message = (message or "").strip()
+        if not effective_message and has_attachment:
+            effective_message = "What tile is this, and can you recommend matching options from your catalogue?"
+
+        # 1. Retrieve relevant website context (contextualized if follow-up or multimodal)
+        retrieval_query = self._build_retrieval_query(effective_message, active_history)
+        if visual_summary:
+            retrieval_query = f"{retrieval_query} {visual_summary}".strip()
+
         retrieval_result = self.retriever.retrieve(
             query=retrieval_query,
             top_k=top_k,
@@ -267,23 +406,29 @@ class SurfacesChatbot:
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
-        # 2. Build prompt including prior history messages and dynamic intent instructions
-        prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
+        # 2. Build prompt including prior history messages, attachment details, and dynamic intent instructions
+        prompt = build_rag_prompt(
+            user_question=effective_message,
+            context=context,
+            history=active_history,
+            attachment_info=attachment_info
+        )
 
         # 3. Generate response using Gemini
         if self.mock_mode or not self.client:
-            answer = self._generate_mock_response(message, retrieval_result, active_history)
+            answer = self._generate_mock_response(effective_message, retrieval_result, active_history)
         else:
             from google.genai import types
+            contents = [prompt, gemini_part] if gemini_part is not None else prompt
             for attempt in range(2):
                 try:
                     response = self.client.models.generate_content(
                         model=self.model_name,
-                        contents=prompt,
+                        contents=contents,
                         config=types.GenerateContentConfig(
                             system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
                             temperature=0.3,
-                            max_output_tokens=250,
+                            max_output_tokens=280,
                             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                         )
                     )
@@ -330,7 +475,13 @@ class SurfacesChatbot:
         ):
             sources = []
 
-        products = self._resolve_product_cards(message, sources, answer)
+        products = self._resolve_product_cards(
+            effective_message,
+            sources,
+            answer,
+            has_attachment=has_attachment,
+            visual_query=visual_summary
+        )
 
         return {
             "answer": answer,
@@ -343,7 +494,8 @@ class SurfacesChatbot:
         message: str,
         history: Optional[List[Any]] = None,
         category: Optional[str] = None,
-        top_k: Optional[int] = None
+        top_k: Optional[int] = None,
+        attachment: Optional[Any] = None
     ):
         """Streaming generator that yields chunks for Server-Sent Events (SSE).
         Yields:
@@ -355,7 +507,61 @@ class SurfacesChatbot:
         max_hist = getattr(settings, "max_chat_history", 10)
         active_history = history[-max_hist:] if history else []
 
-        retrieval_query = self._build_retrieval_query(message, active_history)
+        # Attachment processing
+        gemini_part = None
+        attachment_info = None
+        visual_summary = ""
+        has_attachment = False
+
+        if attachment:
+            data_bytes, filename, mime_type = self._parse_attachment_data(attachment)
+            if data_bytes:
+                has_attachment = True
+                if mime_type.startswith("image/"):
+                    if not self.mock_mode and self.client:
+                        try:
+                            from google.genai import types
+                            gemini_part = types.Part.from_bytes(data=data_bytes, mime_type=mime_type)
+                            visual_summary = self._extract_visual_context(gemini_part, message)
+                        except Exception as e:
+                            logger.warning(f"Failed to create Gemini image Part: {e}")
+                    else:
+                        visual_summary = "grey outdoor textured porcelain floor tiles patio"
+
+                    attachment_info = (
+                        f"Customer attached an image: '{filename}' ({mime_type}).\n"
+                        f"Visual description & properties: {visual_summary}"
+                    )
+                elif mime_type == "application/pdf":
+                    if not self.mock_mode and self.client:
+                        try:
+                            from google.genai import types
+                            gemini_part = types.Part.from_bytes(data=data_bytes, mime_type="application/pdf")
+                        except Exception as e:
+                            logger.warning(f"Failed to create Gemini PDF Part: {e}")
+                    attachment_info = f"Customer attached a PDF document: '{filename}'."
+                elif mime_type.startswith("text/"):
+                    text_snippet = data_bytes.decode("utf-8", errors="ignore")[:3000]
+                    attachment_info = f"Customer attached text file '{filename}' with content:\n{text_snippet}"
+                else:
+                    unsupported_msg = (
+                        f"I received your file '{filename}', but I am currently only able to analyze image files (JPEG, PNG, WebP) "
+                        f"and PDF documents. Please upload a photo of the tile or room, and I'll gladly identify it and recommend matching options!"
+                    )
+                    yield {"event": "sources", "sources": []}
+                    yield {"event": "products", "products": []}
+                    yield {"event": "token", "delta": unsupported_msg}
+                    yield {"event": "done", "answer": unsupported_msg}
+                    return
+
+        effective_message = (message or "").strip()
+        if not effective_message and has_attachment:
+            effective_message = "What tile is this, and can you recommend matching options from your catalogue?"
+
+        retrieval_query = self._build_retrieval_query(effective_message, active_history)
+        if visual_summary:
+            retrieval_query = f"{retrieval_query} {visual_summary}".strip()
+
         retrieval_result = self.retriever.retrieve(
             query=retrieval_query,
             top_k=top_k,
@@ -364,16 +570,27 @@ class SurfacesChatbot:
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
-        prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
+        prompt = build_rag_prompt(
+            user_question=effective_message,
+            context=context,
+            history=active_history,
+            attachment_info=attachment_info
+        )
 
         if self.mock_mode or not self.client:
-            answer = self._generate_mock_response(message, retrieval_result, active_history)
+            answer = self._generate_mock_response(effective_message, retrieval_result, active_history)
             final_sources = [] if (
                 WELCOME_MESSAGE in answer
                 or "Sophie, the AI assistant for Surfaces Tiles UK" in answer
                 or "You're very welcome" in answer
             ) else sources
-            final_products = self._resolve_product_cards(message, final_sources, answer)
+            final_products = self._resolve_product_cards(
+                effective_message,
+                final_sources,
+                answer,
+                has_attachment=has_attachment,
+                visual_query=visual_summary
+            )
             yield {"event": "sources", "sources": final_sources}
             yield {"event": "products", "products": final_products}
             yield {"event": "token", "delta": answer}
@@ -381,16 +598,17 @@ class SurfacesChatbot:
             return
 
         from google.genai import types
+        contents = [prompt, gemini_part] if gemini_part is not None else prompt
         accumulated_text = []
         for attempt in range(2):
             try:
                 stream = self.client.models.generate_content_stream(
                     model=self.model_name,
-                    contents=prompt,
+                    contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=SURFACES_TILES_SYSTEM_PROMPT,
                         temperature=0.3,
-                        max_output_tokens=250,
+                        max_output_tokens=280,
                         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
                     )
                 )
@@ -405,7 +623,13 @@ class SurfacesChatbot:
                     or "Sophie, the AI assistant for Surfaces Tiles UK" in full_answer
                     or "You're very welcome" in full_answer
                 ) else sources
-                final_products = self._resolve_product_cards(message, final_sources, full_answer)
+                final_products = self._resolve_product_cards(
+                    effective_message,
+                    final_sources,
+                    full_answer,
+                    has_attachment=has_attachment,
+                    visual_query=visual_summary
+                )
                 yield {"event": "sources", "sources": final_sources}
                 yield {"event": "products", "products": final_products}
                 yield {"event": "done", "answer": full_answer}
@@ -426,6 +650,7 @@ class SurfacesChatbot:
                 yield {"event": "token", "delta": fallback}
                 yield {"event": "done", "answer": fallback}
                 return
+
 
     def _generate_mock_response(
         self,
