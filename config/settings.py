@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (SurfacesTilesBot/1.0)"
 
     # RAG Settings
-    top_k: int = 10
+    top_k: int = Field(default=4, validation_alias="TOP_K")
     score_threshold: float = 0.2
     max_chat_history: int = Field(default=10, validation_alias="MAX_CHAT_HISTORY")
 
@@ -51,6 +51,25 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", validation_alias="HOST")
     port: int = Field(default=8060, validation_alias="PORT")
     debug: bool = Field(default=False, validation_alias="DEBUG")
+
+    # Voice Assistant (STT & TTS) Settings
+    audio_dir: Path = Field(
+        default=BASE_DIR / "data" / "audio",
+        validation_alias=AliasChoices("AUDIO_DIR", "audio_dir")
+    )
+    stt_model: str = Field(default="tiny.en", validation_alias="STT_MODEL")
+    stt_device: str = Field(default="cpu", validation_alias="STT_DEVICE")
+    stt_compute_type: str = Field(default="int8", validation_alias="STT_COMPUTE_TYPE")
+    stt_language: str = Field(default="en", validation_alias="STT_LANGUAGE")
+    stt_cpu_threads: int = Field(default=4, validation_alias="STT_CPU_THREADS")
+    stt_beam_size: int = Field(default=1, validation_alias="STT_BEAM_SIZE")
+    stt_vad_filter: bool = Field(default=True, validation_alias="STT_VAD_FILTER")
+    stt_min_silence_duration_ms: int = Field(default=300, validation_alias="STT_MIN_SILENCE_DURATION_MS")
+
+    tts_enabled: bool = Field(default=True, validation_alias="TTS_ENABLED")
+    tts_voice: str = Field(default="en-GB-SoniaNeural", validation_alias="TTS_VOICE")
+    tts_rate: str = Field(default="+0%", validation_alias="TTS_RATE")
+    tts_pitch: str = Field(default="+0Hz", validation_alias="TTS_PITCH")
 
 
 settings = Settings()
@@ -60,3 +79,4 @@ settings.data_raw_dir.mkdir(parents=True, exist_ok=True)
 settings.data_processed_dir.mkdir(parents=True, exist_ok=True)
 settings.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
 settings.logs_dir.mkdir(parents=True, exist_ok=True)
+settings.audio_dir.mkdir(parents=True, exist_ok=True)

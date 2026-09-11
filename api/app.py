@@ -31,6 +31,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Error during startup log cleanup: {e}")
 
+    # Pre-warm Voice STT model in background executor to eliminate first-request cold-start latency
+    try:
+        import asyncio
+        from voice import get_stt_service
+        stt = get_stt_service()
+        if hasattr(stt, "warm_up"):
+            asyncio.get_event_loop().run_in_executor(None, stt.warm_up)
+    except Exception as e:
+        logger.warning(f"Voice service warm-up skipped: {e}")
+
     yield
     logger.info("Shutting down Surfaces Tiles UK Chatbot API...")
 
@@ -54,8 +64,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from pathlib import Path
+from fastapi.responses import JSONResponse, FileResponse
+
 # Include routes
 app.include_router(router)
+
+
+@app.get("/demo", summary="Interactive Demo Page", include_in_schema=True)
+def get_demo():
+    demo_path = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+    if demo_path.exists():
+        return FileResponse(str(demo_path), media_type="text/html")
+    return JSONResponse({"error": "frontend/index.html not found"}, status_code=404)
 
 
 @app.get("/", summary="Root Endpoint")
@@ -63,9 +84,16 @@ def root():
     return JSONResponse({
         "message": "Welcome to Surfaces Tiles UK AI Chatbot API",
         "documentation": "/docs",
+        "demo": "/demo",
         "health": "/health",
         "endpoints": {
             "chat": "POST /chat",
+            "chat_stream": "POST /chat/stream",
+            "voice_chat": "POST /voice/chat",
+            "voice_chat_stream": "POST /voice/chat/stream",
+            "voice_transcribe": "POST /voice/transcribe",
+            "voice_synthesize": "POST /voice/synthesize",
+            "products": "GET /products",
             "health": "GET /health",
             "sessions": "GET /sessions",
             "jobs_status": "GET /jobs/status"
