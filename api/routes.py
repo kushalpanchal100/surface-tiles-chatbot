@@ -16,6 +16,7 @@ from api.schemas import (
     ChatData,
     ResponseMeta,
     SourceItem,
+    ProductCardItem,
     HealthResponse,
     ScrapeRequest,
     ScrapeResponse,
@@ -41,6 +42,7 @@ from rag.vector_store import SurfacesVectorStore
 from rag.retriever import SurfacesRetriever
 from rag.embeddings import GeminiEmbeddingService
 from rag.chunker import ContentChunker
+from rag.product_catalog import catalog
 from scraper.scraper import SurfacesScraper
 
 logger = logging.getLogger(__name__)
@@ -158,6 +160,7 @@ def chat_endpoint(
 
         response_text = result.get("answer", "")
         raw_sources = result.get("sources", [])
+        raw_products = result.get("products", [])
 
         # Format sources for response payload
         formatted_sources = []
@@ -169,9 +172,21 @@ def chat_endpoint(
                     category=s.get("category"),
                     content_type=s.get("content_type"),
                     price=s.get("price"),
-                    relevance_score=s.get("relevance_score")
+                    relevance_score=s.get("relevance_score"),
+                    image_url=s.get("image_url"),
+                    variant_id=s.get("variant_id"),
+                    checkout_url=s.get("checkout_url")
                 ))
             except Exception:
+                continue
+
+        # Format product cards for response payload
+        formatted_products = []
+        for p in raw_products:
+            try:
+                formatted_products.append(ProductCardItem(**p))
+            except Exception as pe:
+                logger.warning(f"Error parsing product card: {pe}")
                 continue
 
         # Update session memory
@@ -187,7 +202,10 @@ def chat_endpoint(
                 message="Successfully processed user measurements and preferences"
             ),
             data=ChatData(
-                Response=response_text
+                Response=response_text,
+                products=formatted_products if formatted_products else None,
+                sources=formatted_sources if formatted_sources else None,
+                session_id=session_id
             ),
             statusCode=200
         )
@@ -199,6 +217,7 @@ def chat_endpoint(
             "system_meta": chat_response.meta.model_dump(),
             "retrieved_sources_count": len(raw_sources),
             "retrieved_sources": raw_sources,
+            "products_count": len(formatted_products),
         }
 
         # Asynchronously log the interaction (non-blocking for the client)
@@ -266,11 +285,17 @@ async def chat_stream_endpoint(
                             "url": s.get("url") or settings.base_url,
                             "category": s.get("category"),
                             "content_type": s.get("content_type"),
-                            "price": s.get("price")
+                            "price": s.get("price"),
+                            "image_url": s.get("image_url"),
+                            "variant_id": s.get("variant_id"),
+                            "checkout_url": s.get("checkout_url")
                         })
                     except Exception:
                         pass
                 yield f"event: sources\ndata: {json.dumps({'sources': formatted})}\n\n"
+            elif event_type == "products":
+                raw_prods = chunk.get("products", [])
+                yield f"event: products\ndata: {json.dumps({'products': raw_prods})}\n\n"
             elif event_type == "token":
                 delta = chunk.get("delta", "")
                 accumulated_answer.append(delta)
@@ -359,6 +384,7 @@ async def voice_chat_endpoint(
         user_transcript = result.get("transcribed_text", "")
         response_text = result.get("response_text", "")
         raw_sources = result.get("sources", [])
+        raw_products = result.get("products", [])
 
         # Format sources
         formatted_sources = []
@@ -370,8 +396,19 @@ async def voice_chat_endpoint(
                     category=s.get("category"),
                     content_type=s.get("content_type"),
                     price=s.get("price"),
-                    relevance_score=s.get("relevance_score")
+                    relevance_score=s.get("relevance_score"),
+                    image_url=s.get("image_url"),
+                    variant_id=s.get("variant_id"),
+                    checkout_url=s.get("checkout_url")
                 ))
+            except Exception:
+                continue
+
+        # Format product cards
+        formatted_products = []
+        for p in raw_products:
+            try:
+                formatted_products.append(ProductCardItem(**p))
             except Exception:
                 continue
 
@@ -386,6 +423,7 @@ async def voice_chat_endpoint(
                 audio_base64=result.get("audio_base64", ""),
                 audio_format=result.get("audio_format", "mp3"),
                 session_id=session_id,
+                products=formatted_products if formatted_products else None,
                 sources=formatted_sources if formatted_sources else None,
                 timings=result.get("timings")
             ),
@@ -730,3 +768,25 @@ def get_jobs_status():
         last_scrape=_job_status["last_scrape"],
         last_ingest=_job_status["last_ingest"]
     )
+
+
+@router.get("/products", summary="Search Tile Products Catalogue")
+def search_products(q: Optional[str] = None, category_name: Optional[str] = None, limit: int = 8):
+    """Retrieve products from catalogue with images, specs, Add to Cart and Checkout links."""
+    if q:
+        items = catalog.search(q, top_k=limit, category=category_name)
+    elif category_name:
+        items = catalog.search("", top_k=limit, category=category_name)
+    else:
+        items = catalog.get_popular_tiles(top_k=limit)
+    return {"status": "success", "count": len(items), "products": items}
+
+
+@router.get("/products/{identifier}", summary="Get Tile Product Details by ID, Handle, or URL")
+def get_product_details(identifier: str):
+    """Retrieve single tile product details with images, variants, and purchase URLs."""
+    card = catalog.get_product_card(identifier)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Tile product '{identifier}' not found.")
+    return {"status": "success", "product": card}
+

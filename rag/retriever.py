@@ -1,3 +1,4 @@
+import re
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -63,6 +64,43 @@ class SurfacesRetriever:
         ranked_hits = self._rerank_hits(raw_hits, query)
         hits = ranked_hits[:k]
 
+        from rag.product_catalog import catalog
+
+        # If query has tile/product intent and no product chunks in top hits, supplement with products
+        q_lower = query.lower()
+        has_tile_product_intent = any(w in q_lower for w in [
+            "show", "tile", "tiles", "buy", "purchase", "product", "products",
+            "options", "recommend", "collection", "floor", "wall", "bathroom", "kitchen"
+        ])
+        has_product_chunk = any(
+            (h.get("metadata", {}).get("content_type") == "product")
+            for h in hits[:k]
+        )
+        if has_tile_product_intent and not has_product_chunk:
+            # Supplement from product catalog
+            cat_cards = catalog.search(query, top_k=k)
+            for c in cat_cards:
+                pseudo_chunk = {
+                    "text": f"Product: {c['title']}\nPrice: {c['price']}\nSize: {c['dimensions']}\nFinish: {c['finish']}\nURL: {c['url']}\n{c['description_snippet']}",
+                    "metadata": {
+                        "url": c["url"],
+                        "title": c["title"],
+                        "product_name": c["title"],
+                        "category": c["category"],
+                        "content_type": "product",
+                        "price": c["price"],
+                        "dimensions": c["dimensions"],
+                        "finish": c["finish"],
+                        "material": c["material"],
+                        "image_url": c["image_url"],
+                        "variant_id": c["variant_id"],
+                        "checkout_url": c["checkout_url"]
+                    },
+                    "score": 0.85
+                }
+                hits.insert(0, pseudo_chunk)
+            hits = hits[:k]
+
         # Build sources list and context string
         sources: List[Dict[str, Any]] = []
         seen_urls = set()
@@ -76,16 +114,33 @@ class SurfacesRetriever:
             ctype = meta.get("content_type")
             price = meta.get("price")
 
+            # Enrich product metadata from catalog if available
+            raw_p = None
+            if ctype == "product" or "/products/" in url:
+                raw_p = catalog.find(url) or catalog.find(title)
+            card = catalog.get_product_card(raw_p) if raw_p else None
+
+            image_url = (card.get("image_url") if card else None) or meta.get("image_url")
+            variant_id = (card.get("variant_id") if card else None) or meta.get("variant_id")
+            checkout_url = (card.get("checkout_url") if card else None) or meta.get("checkout_url")
+
             if url and url not in seen_urls:
                 seen_urls.add(url)
-                sources.append({
+                source_entry = {
                     "title": title,
                     "url": url,
                     "category": cat,
                     "content_type": ctype,
-                    "price": price if price else None,
+                    "price": price if price else (card["price"] if card else None),
                     "relevance_score": hit.get("score")
-                })
+                }
+                if image_url:
+                    source_entry["image_url"] = image_url
+                if variant_id:
+                    source_entry["variant_id"] = variant_id
+                if checkout_url:
+                    source_entry["checkout_url"] = checkout_url
+                sources.append(source_entry)
 
             context_parts.append(
                 f"--- DOCUMENT {idx} [Title: {title} | URL: {url}] ---\n"
@@ -111,6 +166,7 @@ class SurfacesRetriever:
         has_outdoor_intent = any(w in q_lower for w in ["outdoor", "patio", "terrace", "garden", "balcony", "exterior", "outside", "paving"])
         has_floor_intent = any(w in q_lower for w in ["floor", "flooring", "ground"])
         has_wall_intent = any(w in q_lower for w in ["wall", "walls", "splashback"])
+        has_buy_or_show_intent = any(w in q_lower for w in ["show", "buy", "purchase", "order", "tiles", "tile", "cost", "price", "recommend", "options"])
 
         reranked = []
         for hit in hits:
@@ -118,6 +174,7 @@ class SurfacesRetriever:
             meta = hit.get("metadata") or {}
             text = (hit.get("text") or "").lower()
             title = (meta.get("title") or meta.get("product_name") or "").lower()
+            ctype = meta.get("content_type")
 
             raw_is_outdoor = meta.get("is_outdoor")
             is_outdoor = (
@@ -136,6 +193,15 @@ class SurfacesRetriever:
             )
 
             boost = 0.0
+
+            # Boost product chunks when the user wants to see, browse, or buy tiles
+            if ctype == "product" and has_buy_or_show_intent:
+                boost += 0.12
+
+            # Direct product name match boost
+            clean_q = re.sub(r"[^a-z0-9]+", " ", q_lower).strip()
+            if clean_q and len(clean_q) > 3 and clean_q in title:
+                boost += 0.35
 
             # Room & environment alignment
             if has_indoor_intent:

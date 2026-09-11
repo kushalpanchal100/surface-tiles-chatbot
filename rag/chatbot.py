@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from config.settings import settings
 from rag.retriever import SurfacesRetriever
 from rag.prompt import SURFACES_TILES_SYSTEM_PROMPT, build_rag_prompt
+from rag.product_catalog import catalog
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,77 @@ class SurfacesChatbot:
 
         return None
 
+    def _resolve_product_cards(
+        self,
+        message: str,
+        sources: List[Dict[str, Any]],
+        answer: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Extract and resolve standardized tile product cards for rich display."""
+        cards: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        def add_card(c: Optional[Dict[str, Any]]):
+            if c and c.get("id") and c["id"] not in seen_ids:
+                seen_ids.add(c["id"])
+                cards.append(c)
+
+        lower_msg = (message or "").lower()
+        is_buy_intent = any(w in lower_msg for w in [
+            "buy", "purchase", "order", "want to buy", "i want to buy", "i'll take", "checkout", "add to cart"
+        ])
+        is_show_intent = any(w in lower_msg for w in [
+            "show", "browse", "view", "see", "recommend", "options", "display", "tiles", "tile", "range", "collection"
+        ])
+
+        # 1. Direct match in product catalog from the user query
+        # Remove common phrases like "i want to buy", "show me", "can i get"
+        cleaned_query = re.sub(
+            r"^(i\s+want\s+to\s+buy|show\s+me|show\s+tiles|show|can\s+i\s+get|i\s+would\s+like\s+to\s+buy|buy\s+the|buy)\s+",
+            "",
+            lower_msg
+        ).strip()
+        if cleaned_query and len(cleaned_query) >= 3:
+            direct_match = catalog.find(cleaned_query)
+            if direct_match:
+                add_card(catalog.get_product_card(direct_match))
+
+        # 2. Extract products referenced in the model's generated answer (markdown links)
+        # e.g. [Snow Sheen ...](https://surfacestiles.co.uk/products/...)
+        answer_links = re.findall(r"\[(.*?)\]\((https?://[^\s)]+)\)", answer or "")
+        for link_title, link_url in answer_links:
+            if "/products/" in link_url or "surfacestiles.co.uk" in link_url:
+                p = catalog.find(link_url) or catalog.find(link_title)
+                if p:
+                    add_card(catalog.get_product_card(p))
+
+        # 3. Extract products from retrieved sources
+        for s in sources:
+            ctype = (s.get("content_type") or "").lower()
+            url = s.get("url") or ""
+            title = s.get("title") or ""
+            if ctype == "product" or "/products/" in url:
+                p = catalog.find(url) or catalog.find(title)
+                if p:
+                    add_card(catalog.get_product_card(p))
+
+        # 4. If user asked to "show tiles" or "buy" and we still have fewer than 2 cards, search catalog
+        if (is_show_intent or is_buy_intent or not cards) and len(cards) < 3:
+            search_query = cleaned_query if (cleaned_query and len(cleaned_query) > 3) else message
+            query_cards = catalog.search(search_query, top_k=4)
+            for qc in query_cards:
+                add_card(qc)
+
+        # Pin specific requested product at the beginning if buy intent
+        if is_buy_intent and cards:
+            for i, c in enumerate(cards):
+                c_words = [w for w in c["title"].lower().split() if len(w) > 3]
+                if any(w in lower_msg for w in c_words):
+                    cards.insert(0, cards.pop(i))
+                    break
+
+        return cards[:4]
+
     def answer_question(
         self,
         message: str,
@@ -162,7 +234,8 @@ class SurfacesChatbot:
         if fast_answer:
             return {
                 "answer": fast_answer,
-                "sources": []
+                "sources": [],
+                "products": []
             }
 
         # Ensure history is clamped to max configured limit (default: 10)
@@ -221,7 +294,7 @@ class SurfacesChatbot:
                             answer = (
                                 f"Here is the best matching option:\n\n"
                                 f"1. **[{top_source['title']}]({top_source['url']})**{price_str}{size_str}\n\n"
-                                f"Would you like me to recommend the best one for your room?"
+                                f"You can add it directly to your cart or purchase using the card below. Would you like me to help calculate the area for your room?"
                             )
                         else:
                             answer = (
@@ -239,9 +312,12 @@ class SurfacesChatbot:
                             answer = "I'm sorry, I couldn't find that in our catalogue. Could you let me know the colour, size, or room you're looking to tile?"
                     break
 
+        products = self._resolve_product_cards(message, sources, answer)
+
         return {
             "answer": answer,
-            "sources": sources
+            "sources": sources,
+            "products": products
         }
 
     def stream_answer_question(
@@ -254,6 +330,7 @@ class SurfacesChatbot:
         """Streaming generator that yields chunks for Server-Sent Events (SSE).
         Yields:
             {"event": "sources", "sources": [...]}
+            {"event": "products", "products": [...]}
             {"event": "token", "delta": "..."}
             {"event": "done", "answer": "..."}
         """
@@ -261,6 +338,7 @@ class SurfacesChatbot:
         fast_answer = self._check_fast_path(message)
         if fast_answer:
             yield {"event": "sources", "sources": []}
+            yield {"event": "products", "products": []}
             yield {"event": "token", "delta": fast_answer}
             yield {"event": "done", "answer": fast_answer}
             return
@@ -277,12 +355,18 @@ class SurfacesChatbot:
         context = retrieval_result.get("context", "")
         sources = retrieval_result.get("sources", [])
 
+        # Emit sources and preliminary products
+        initial_products = self._resolve_product_cards(message, sources, "")
         yield {"event": "sources", "sources": sources}
+        yield {"event": "products", "products": initial_products}
 
         prompt = build_rag_prompt(user_question=message, context=context, history=active_history)
 
         if self.mock_mode or not self.client:
             answer = self._generate_mock_response(message, retrieval_result, active_history)
+            final_products = self._resolve_product_cards(message, sources, answer)
+            if len(final_products) > len(initial_products):
+                yield {"event": "products", "products": final_products}
             yield {"event": "token", "delta": answer}
             yield {"event": "done", "answer": answer}
             return
@@ -306,6 +390,9 @@ class SurfacesChatbot:
                     yield {"event": "token", "delta": chunk.text}
 
             full_answer = "".join(accumulated_text)
+            final_products = self._resolve_product_cards(message, sources, full_answer)
+            if len(final_products) > len(initial_products):
+                yield {"event": "products", "products": final_products}
             yield {"event": "done", "answer": full_answer}
         except Exception as e:
             logger.error(f"Error streaming from Gemini API: {e}")

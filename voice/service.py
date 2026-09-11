@@ -81,6 +81,7 @@ class VoiceAssistantService:
 
         response_text = chatbot_result.get("answer", "")
         raw_sources = chatbot_result.get("sources", [])
+        raw_products = chatbot_result.get("products", [])
 
         # 3. Step 3: Text-to-Speech (TTS) via Neural Edge-TTS
         tts_result = await self.tts_service.synthesize(response_text)
@@ -106,6 +107,7 @@ class VoiceAssistantService:
             "audio_base64": tts_result["audio_base64"],
             "audio_format": "mp3",
             "sources": raw_sources,
+            "products": raw_products,
             "session_id": session_id,
             "timings": {
                 "stt_seconds": stt_result.get("latency_seconds", 0),

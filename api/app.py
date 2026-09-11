@@ -54,8 +54,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from pathlib import Path
+from fastapi.responses import JSONResponse, FileResponse
+
 # Include routes
 app.include_router(router)
+
+
+@app.get("/demo", summary="Interactive Demo Page", include_in_schema=True)
+def get_demo():
+    demo_path = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+    if demo_path.exists():
+        return FileResponse(str(demo_path), media_type="text/html")
+    return JSONResponse({"error": "frontend/index.html not found"}, status_code=404)
 
 
 @app.get("/", summary="Root Endpoint")
@@ -63,6 +74,7 @@ def root():
     return JSONResponse({
         "message": "Welcome to Surfaces Tiles UK AI Chatbot API",
         "documentation": "/docs",
+        "demo": "/demo",
         "health": "/health",
         "endpoints": {
             "chat": "POST /chat",
@@ -70,6 +82,7 @@ def root():
             "voice_chat": "POST /voice/chat",
             "voice_transcribe": "POST /voice/transcribe",
             "voice_synthesize": "POST /voice/synthesize",
+            "products": "GET /products",
             "health": "GET /health",
             "sessions": "GET /sessions",
             "jobs_status": "GET /jobs/status"
