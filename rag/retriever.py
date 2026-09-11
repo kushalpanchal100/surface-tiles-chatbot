@@ -76,7 +76,13 @@ class SurfacesRetriever:
             (h.get("metadata", {}).get("content_type") == "product")
             for h in hits[:k]
         )
-        if has_tile_product_intent and not has_product_chunk:
+        is_info_query = any(w in q_lower for w in [
+            "where", "location", "address", "showroom", "directions", "postcode",
+            "contact", "phone", "email", "opening hours", "open", "close", "hours",
+            "return policy", "refund"
+        ]) and not any(w in q_lower for w in ["buy", "purchase", "show tiles", "browse"])
+
+        if has_tile_product_intent and not has_product_chunk and not is_info_query:
             # Supplement from product catalog
             cat_cards = catalog.search(query, top_k=k)
             for c in cat_cards:

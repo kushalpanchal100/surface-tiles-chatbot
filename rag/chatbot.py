@@ -150,13 +150,94 @@ class SurfacesChatbot:
 
         return None
 
+    def _is_general_info_or_policy_query(self, message: str) -> bool:
+        """Check if message is an informational, store location, or policy question.
+        
+        Such questions must NOT display product cards or shopping carousels.
+        """
+        clean_msg = (message or "").lower().strip()
+        if not clean_msg:
+            return False
+
+        # If user explicitly uses buy or show phrases, it is not purely informational
+        has_buy_phrase = any(p in clean_msg for p in [
+            "buy", "purchase", "order", "checkout", "add to cart", "add to basket",
+            "how much is", "price of", "cost of"
+        ])
+        has_show_phrase = any(p in clean_msg for p in [
+            "show tiles", "show me tiles", "browse tiles", "view tiles", "see tiles", "display tiles",
+            "show outdoor", "show porcelain", "show marble", "show bathroom", "show floor", "show wall"
+        ])
+        if has_buy_phrase or has_show_phrase:
+            return False
+
+        info_indicators = [
+            # Location, address & store
+            "where are you", "where is", "where's", "location", "address", "showroom", "directions",
+            "postcode", "based", "situated", "store located", "shop located", "find you", "visit you",
+            "store address", "london store", "harrow", "shop address", "where can i visit",
+            # Contact
+            "phone", "telephone", "email", "contact", "call you", "reach you", "customer service",
+            # Hours & opening
+            "opening hours", "open hours", "what time do you open", "what time do you close",
+            "when are you open", "closing time", "open on sunday", "open today",
+            # Shipping & delivery policies (general)
+            "how does delivery work", "how long does delivery take", "delivery times", "delivery cost",
+            "how much is delivery", "free delivery", "deliver to scotland", "deliver nationwide",
+            # Returns & refunds (general)
+            "return policy", "returns policy", "refund policy", "can i return", "return tiles",
+            "how do i return", "exchange policy", "cancellation", "cancel order",
+            # About company
+            "who are you", "about surfaces tiles", "who owns", "about your company", "about us",
+            # General installation/methods without tile product request
+            "how to tile", "how to install", "how much wastage", "calculate wastage", "what is wastage"
+        ]
+
+        return any(ind in clean_msg for ind in info_indicators)
+
     def _resolve_product_cards(
         self,
         message: str,
         sources: List[Dict[str, Any]],
         answer: str = ""
     ) -> List[Dict[str, Any]]:
-        """Extract and resolve standardized tile product cards for rich display."""
+        """Extract and resolve standardized tile product cards for rich display.
+        
+        Cards are ONLY returned when the user expresses clear product shopping intent:
+        - Wants to buy/purchase/order a tile
+        - Asks to show/browse/view tiles or tile recommendations
+        - Inquires about a specific tile product or style
+        
+        Basic informational queries (location, store address, hours, contact, general
+        delivery/return policies) return NO product cards.
+        """
+        # 1. If basic informational / store / policy query, do not show product cards
+        if self._is_general_info_or_policy_query(message):
+            return []
+
+        lower_msg = (message or "").lower()
+
+        # 2. Detect explicit shopping/browsing/buying intent
+        is_buy_intent = any(w in lower_msg for w in [
+            "buy", "purchase", "order", "want to buy", "i want to buy", "i'll take",
+            "checkout", "add to cart", "add to basket", "how much is", "can i buy"
+        ])
+        is_show_intent = any(w in lower_msg for w in [
+            "show", "browse", "view", "see", "recommend", "options", "display",
+            "range", "collection", "looking for", "suggest", "find me"
+        ])
+        is_tile_query = any(w in lower_msg for w in [
+            "tile", "tiles", "porcelain", "marble", "ceramic", "slab", "slabs",
+            "paver", "pavers", "flooring", "wood effect", "stone effect"
+        ])
+
+        # If user did NOT express buy intent, show intent, or tile query, do not show cards
+        if not (is_buy_intent or is_show_intent or is_tile_query):
+            # Check if user mentioned a specific product title or handle directly
+            direct_check = catalog.find(lower_msg)
+            if not direct_check:
+                return []
+
         cards: List[Dict[str, Any]] = []
         seen_ids = set()
 
@@ -165,18 +246,9 @@ class SurfacesChatbot:
                 seen_ids.add(c["id"])
                 cards.append(c)
 
-        lower_msg = (message or "").lower()
-        is_buy_intent = any(w in lower_msg for w in [
-            "buy", "purchase", "order", "want to buy", "i want to buy", "i'll take", "checkout", "add to cart"
-        ])
-        is_show_intent = any(w in lower_msg for w in [
-            "show", "browse", "view", "see", "recommend", "options", "display", "tiles", "tile", "range", "collection"
-        ])
-
-        # 1. Direct match in product catalog from the user query
-        # Remove common phrases like "i want to buy", "show me", "can i get"
+        # 3. Direct match in product catalog from the user query
         cleaned_query = re.sub(
-            r"^(i\s+want\s+to\s+buy|show\s+me|show\s+tiles|show|can\s+i\s+get|i\s+would\s+like\s+to\s+buy|buy\s+the|buy)\s+",
+            r"^(i\s+want\s+to\s+buy|show\s+me|show\s+tiles|show|can\s+i\s+get|i\s+would\s+like\s+to\s+buy|buy\s+the|buy|looking\s+for)\s+",
             "",
             lower_msg
         ).strip()
@@ -185,7 +257,7 @@ class SurfacesChatbot:
             if direct_match:
                 add_card(catalog.get_product_card(direct_match))
 
-        # 2. Extract products referenced in the model's generated answer (markdown links)
+        # 4. Extract products referenced in the model's generated answer (markdown links)
         # e.g. [Snow Sheen ...](https://surfacestiles.co.uk/products/...)
         answer_links = re.findall(r"\[(.*?)\]\((https?://[^\s)]+)\)", answer or "")
         for link_title, link_url in answer_links:
@@ -194,7 +266,7 @@ class SurfacesChatbot:
                 if p:
                     add_card(catalog.get_product_card(p))
 
-        # 3. Extract products from retrieved sources
+        # 5. Extract products from retrieved sources
         for s in sources:
             ctype = (s.get("content_type") or "").lower()
             url = s.get("url") or ""
@@ -204,8 +276,8 @@ class SurfacesChatbot:
                 if p:
                     add_card(catalog.get_product_card(p))
 
-        # 4. If user asked to "show tiles" or "buy" and we still have fewer than 2 cards, search catalog
-        if (is_show_intent or is_buy_intent or not cards) and len(cards) < 3:
+        # 6. If user asked to "show tiles" or "buy" and we still have fewer than 2 cards, search catalog
+        if (is_show_intent or is_buy_intent) and len(cards) < 3:
             search_query = cleaned_query if (cleaned_query and len(cleaned_query) > 3) else message
             query_cards = catalog.search(search_query, top_k=4)
             for qc in query_cards:
