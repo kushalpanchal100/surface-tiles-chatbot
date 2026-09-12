@@ -56,7 +56,8 @@ class VoiceAssistantService:
         session_id: str,
         chatbot: SurfacesChatbot,
         history: Optional[List[Any]] = None,
-        language: Optional[str] = None
+        language: Optional[str] = None,
+        cancel_event: Optional[asyncio.Event] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Low-latency streaming voice chat pipeline.
         
@@ -167,6 +168,9 @@ class VoiceAssistantService:
         )
 
         for chunk in stream_gen:
+            if cancel_event and cancel_event.is_set():
+                logger.info(f"[VoiceAssistant Stream] Stream cancelled by cancel_event during token generation")
+                return
             evt = chunk.get("event")
             if evt == "sources":
                 raw_sources = chunk.get("sources", [])
@@ -191,8 +195,12 @@ class VoiceAssistantService:
                         if len(s1.split()) >= 3 or ("." in s1 and len(s1) > 15):
                             first_sentence_sent = True
                             sentence_buffer = sentence_buffer[end_pos:]
+                            if cancel_event and cancel_event.is_set():
+                                return
                             try:
                                 tts_s1 = await self.tts_service.synthesize(s1)
+                                if cancel_event and cancel_event.is_set():
+                                    return
                                 yield {
                                     "event": "audio_chunk",
                                     "chunk_index": chunk_counter,
@@ -208,6 +216,9 @@ class VoiceAssistantService:
 
             elif evt == "done":
                 break
+
+        if cancel_event and cancel_event.is_set():
+            return
 
         full_answer = "".join(token_accumulator).strip()
         if not full_answer:
@@ -226,6 +237,8 @@ class VoiceAssistantService:
 
         # Synthesize remaining sentences sequentially into queue
         for sentence in remaining_sentences:
+            if cancel_event and cancel_event.is_set():
+                return
             clean_s = sentence.strip()
             if not clean_s:
                 continue

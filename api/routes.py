@@ -3,8 +3,9 @@ import uuid
 import base64
 import logging
 import threading
+import asyncio
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from typing import Optional, Dict, Any, List
 
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Global state and synchronization locks
-_state_lock = threading.Lock()
+_state_lock = threading.RLock()
 _vector_store: Optional[SurfacesVectorStore] = None
 _embedding_service: Optional[GeminiEmbeddingService] = None
 _chatbot: Optional[SurfacesChatbot] = None
@@ -85,14 +86,16 @@ def get_embedding_service() -> GeminiEmbeddingService:
 
 
 def get_chatbot(
-    vstore: SurfacesVectorStore = Depends(get_vector_store),
-    embs: GeminiEmbeddingService = Depends(get_embedding_service)
+    vstore: Optional[SurfacesVectorStore] = Depends(get_vector_store),
+    embs: Optional[GeminiEmbeddingService] = Depends(get_embedding_service)
 ) -> SurfacesChatbot:
     global _chatbot
     if _chatbot is None:
         with _state_lock:
             if _chatbot is None:
-                retriever = SurfacesRetriever(vector_store=vstore, embedding_service=embs)
+                actual_vstore = vstore if isinstance(vstore, SurfacesVectorStore) else get_vector_store()
+                actual_embs = embs if isinstance(embs, GeminiEmbeddingService) else get_embedding_service()
+                retriever = SurfacesRetriever(vector_store=actual_vstore, embedding_service=actual_embs)
                 _chatbot = SurfacesChatbot(retriever=retriever)
     return _chatbot
 
@@ -900,4 +903,188 @@ def get_product_details(identifier: str):
     if not card:
         raise HTTPException(status_code=404, detail=f"Tile product '{identifier}' not found.")
     return {"status": "success", "product": card}
+
+
+@router.websocket("/voice/ws")
+async def voice_websocket_endpoint(
+    websocket: WebSocket
+):
+    """Full-duplex WebSocket streaming endpoint for real-time voice chat.
+
+    Bypasses proxy buffering (Nginx, Cloudflare), eliminates per-turn HTTP/TLS overhead,
+    and supports instant user barge-in / interruption.
+
+    Supported Client Messages:
+    - Binary frame: Raw audio bytes (WebM, WAV, MP3) to transcribe and process.
+    - JSON {"type": "init", "session_id": "..."}: Set or validate session UUID.
+    - JSON {"type": "audio", "data": "<base64>", "session_id": "..."}: Base64 audio payload.
+    - JSON {"type": "interrupt"}: Immediately abort in-flight AI generation & TTS synthesis.
+    - JSON {"type": "ping"}: Heartbeat keepalive, responded with {"event": "pong"}.
+
+    Emitted Server Events:
+    - {"event": "connected", "session_id": "..."}
+    - {"event": "transcript", "text": "...", "stt_latency": ...}
+    - {"event": "audio_chunk", "chunk_index": 0, "text": "...", "audio_base64": "...", "is_final": false}
+    - {"event": "products", "products": [...]}
+    - {"event": "sources", "sources": [...]}
+    - {"event": "done", "answer": "...", "session_id": "...", "timings": {...}}
+    - {"event": "interrupted", "session_id": "..."}
+    - {"event": "error", "message": "..."}
+    """
+    await websocket.accept()
+    session_id = str(uuid.uuid4())
+    active_cancel_event: Optional[asyncio.Event] = None
+    active_turn_task: Optional[asyncio.Task] = None
+
+    chatbot = get_chatbot()
+    voice_service = get_voice_service()
+
+    await websocket.send_json({
+        "event": "connected",
+        "session_id": session_id,
+        "message": "Sophie Voice Assistant WebSocket ready"
+    })
+
+    async def run_voice_turn(audio_data: bytes, s_id: str, cancel_ev: asyncio.Event):
+        interaction_time = datetime.now()
+        last_transcript = ""
+        last_answer = ""
+        timings = {}
+        try:
+            async for chunk in voice_service.stream_voice_chat(
+                audio_input=audio_data,
+                session_id=s_id,
+                chatbot=chatbot,
+                cancel_event=cancel_ev
+            ):
+                if cancel_ev.is_set():
+                    break
+                event_name = chunk.get("event")
+                if event_name == "transcript":
+                    last_transcript = chunk.get("text", "")
+                elif event_name == "done":
+                    last_answer = chunk.get("answer", "")
+                    timings = chunk.get("timings", {})
+
+                await websocket.send_json(chunk)
+
+            # Log interaction in background upon completion
+            if last_transcript:
+                internal_details = {
+                    "status_code": 200,
+                    "session_id": s_id,
+                    "mode": "voice_ws",
+                    "timings": timings
+                }
+                log_interaction_background(
+                    background_tasks=None,
+                    user_input=f"[VOICE WS] {last_transcript}",
+                    internal_response=internal_details,
+                    ai_response=last_answer,
+                    user_response={"transcript": last_transcript, "answer": last_answer, "timings": timings},
+                    timestamp=interaction_time
+                )
+        except asyncio.CancelledError:
+            logger.info(f"[Voice WS] Turn cancelled by user interrupt for session {s_id}")
+            try:
+                await websocket.send_json({"event": "interrupted", "session_id": s_id})
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"[Voice WS] Error processing voice turn: {e}", exc_info=True)
+            try:
+                await websocket.send_json({"event": "error", "message": str(e)})
+            except Exception:
+                pass
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"]:
+                audio_bytes = message["bytes"]
+                if len(audio_bytes) < 100:
+                    await websocket.send_json({"event": "error", "message": "Audio payload too short or empty."})
+                    continue
+
+                if active_cancel_event and not active_cancel_event.is_set():
+                    active_cancel_event.set()
+                if active_turn_task and not active_turn_task.done():
+                    active_turn_task.cancel()
+
+                active_cancel_event = asyncio.Event()
+                active_turn_task = asyncio.create_task(
+                    run_voice_turn(audio_bytes, session_id, active_cancel_event)
+                )
+
+            elif "text" in message and message["text"]:
+                try:
+                    payload = json.loads(message["text"])
+                except Exception:
+                    await websocket.send_json({"event": "error", "message": "Invalid JSON format."})
+                    continue
+
+                msg_type = payload.get("type", "")
+
+                if msg_type == "ping":
+                    await websocket.send_json({"event": "pong"})
+
+                elif msg_type == "init":
+                    req_sid = payload.get("session_id")
+                    if req_sid and str(req_sid).strip():
+                        try:
+                            session_id = str(uuid.UUID(str(req_sid).strip()))
+                        except Exception:
+                            pass
+                    await websocket.send_json({"event": "session_updated", "session_id": session_id})
+
+                elif msg_type == "interrupt":
+                    if active_cancel_event and not active_cancel_event.is_set():
+                        active_cancel_event.set()
+                    if active_turn_task and not active_turn_task.done():
+                        active_turn_task.cancel()
+                    await websocket.send_json({"event": "interrupted", "session_id": session_id})
+
+                elif msg_type == "audio":
+                    raw_b64 = payload.get("data") or payload.get("audio") or ""
+                    req_sid = payload.get("session_id")
+                    if req_sid and str(req_sid).strip():
+                        try:
+                            session_id = str(uuid.UUID(str(req_sid).strip()))
+                        except Exception:
+                            pass
+                    if "," in raw_b64:
+                        raw_b64 = raw_b64.split(",", 1)[1]
+                    try:
+                        audio_bytes = base64.b64decode(raw_b64)
+                    except Exception:
+                        await websocket.send_json({"event": "error", "message": "Failed to decode base64 audio."})
+                        continue
+
+                    if len(audio_bytes) < 100:
+                        await websocket.send_json({"event": "error", "message": "Audio payload too short or empty."})
+                        continue
+
+                    if active_cancel_event and not active_cancel_event.is_set():
+                        active_cancel_event.set()
+                    if active_turn_task and not active_turn_task.done():
+                        active_turn_task.cancel()
+
+                    active_cancel_event = asyncio.Event()
+                    active_turn_task = asyncio.create_task(
+                        run_voice_turn(audio_bytes, session_id, active_cancel_event)
+                    )
+
+    except WebSocketDisconnect:
+        logger.info(f"[Voice WS] Client disconnected cleanly for session {session_id}")
+        if active_cancel_event:
+            active_cancel_event.set()
+        if active_turn_task and not active_turn_task.done():
+            active_turn_task.cancel()
+    except Exception as e:
+        logger.warning(f"[Voice WS] WebSocket connection error: {e}")
+        if active_cancel_event:
+            active_cancel_event.set()
+        if active_turn_task and not active_turn_task.done():
+            active_turn_task.cancel()
+
 

@@ -91,6 +91,7 @@ def root():
             "chat_stream": "POST /chat/stream",
             "voice_chat": "POST /voice/chat",
             "voice_chat_stream": "POST /voice/chat/stream",
+            "voice_ws": "WS /voice/ws",
             "voice_transcribe": "POST /voice/transcribe",
             "voice_synthesize": "POST /voice/synthesize",
             "products": "GET /products",
